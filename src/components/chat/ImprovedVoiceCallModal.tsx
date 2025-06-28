@@ -1,0 +1,500 @@
+import React, { useState, useEffect, useRef } from 'react';
+import { Button } from '@/components/ui/button';
+import { Dialog, DialogContent, DialogTitle, DialogDescription } from '@/components/ui/dialog';
+import { ImprovedVoiceCallService, CallStatus, defaultImprovedVoiceCallConfig } from '@/lib/webrtc/improvedVoiceCall';
+import { useUserContext } from '@/context/AuthContext';
+import { getUserAvatarUrl } from '@/lib/appwrite/api';
+
+interface ImprovedVoiceCallModalProps {
+  isOpen: boolean;
+  onClose: () => void;
+  targetUser: {
+    id: string;
+    name: string;
+    avatar?: string;
+  };
+  mode: 'outgoing' | 'incoming';
+  incomingOffer?: RTCSessionDescriptionInit | null;
+  onIncomingCall?: (fromUserId: string, callerInfo: { userId: string; offer: RTCSessionDescriptionInit; callerName?: string; callerAvatar?: string }) => void;
+}
+
+const ImprovedVoiceCallModal: React.FC<ImprovedVoiceCallModalProps> = ({
+  isOpen,
+  onClose,
+  targetUser,
+  mode,
+  incomingOffer,
+  onIncomingCall
+}) => {
+  const { user } = useUserContext();
+  const [callStatus, setCallStatus] = useState<CallStatus>('idle');
+  const [isMuted, setIsMuted] = useState(false);
+  const [callDuration, setCallDuration] = useState(0);
+  const [error, setError] = useState<string | null>(null);
+  
+  const voiceServiceRef = useRef<ImprovedVoiceCallService | null>(null);
+  const remoteAudioRef = useRef<HTMLAudioElement>(null);
+  const callTimerRef = useRef<NodeJS.Timeout | null>(null);
+  const [isServiceInitialized, setIsServiceInitialized] = useState(false);
+
+  // 初始化语音通话服务
+  useEffect(() => {
+    const initializeService = async () => {
+      if (isOpen && user?.$id && !voiceServiceRef.current) {
+        try {
+          console.log('🚀 初始化改进的语音通话服务');
+          voiceServiceRef.current = new ImprovedVoiceCallService(defaultImprovedVoiceCallConfig);
+          
+          // 设置回调函数
+          voiceServiceRef.current.setCallbacks({
+            onStatusChange: (status) => {
+              console.log('📱 通话状态变化:', status);
+              setCallStatus(status);
+              if (status === 'connected') {
+                startCallTimer();
+              } else if (status === 'ended' || status === 'rejected' || status === 'failed') {
+                stopCallTimer();
+                setTimeout(() => {
+                  onClose();
+                }, 2000);
+              }
+            },
+            onRemoteStream: (stream) => {
+              console.log('🔊 接收到远程音频流');
+              if (remoteAudioRef.current) {
+                remoteAudioRef.current.srcObject = stream;
+                remoteAudioRef.current.play().catch(error => {
+                  console.error('播放远程音频失败:', error);
+                });
+              }
+            },
+            onError: (error) => {
+              console.error('❌ 语音通话错误:', error);
+              setError(error.message);
+              setCallStatus('failed');
+            },
+            onIncomingCall: (fromUserId, callerInfo) => {
+              console.log('📞 收到来电通知:', fromUserId, callerInfo);
+              // 调用父组件传入的回调函数
+              if (onIncomingCall) {
+                onIncomingCall(fromUserId, callerInfo);
+              }
+            }
+          });
+
+          // 初始化用户
+          await voiceServiceRef.current.initializeUser(user.$id);
+          
+          // 设置当前用户信息
+          const userInfo = {
+            name: user.name || '未知用户',
+            avatar: getUserAvatarUrl(user.imageUrl) // 使用专门的函数处理头像URL
+          };
+          
+          console.log('📝 设置当前用户信息:', userInfo);
+          console.log('🖼️ 原始用户头像URL:', user.imageUrl);
+          console.log('🖼️ 处理后的头像URL:', userInfo.avatar);
+          console.log('👤 完整用户对象:', user);
+          
+          voiceServiceRef.current.setCurrentUserInfo(userInfo);
+          
+          setIsServiceInitialized(true);
+          console.log('✅ 语音通话服务初始化完成');
+
+        } catch (error) {
+          console.error('❌ 初始化语音通话服务失败:', error);
+          setError('初始化语音通话服务失败');
+        }
+      }
+    };
+
+    initializeService();
+
+    return () => {
+      if (voiceServiceRef.current) {
+        voiceServiceRef.current.destroy();
+        voiceServiceRef.current = null;
+        setIsServiceInitialized(false);
+      }
+      stopCallTimer();
+    };
+  }, [isOpen, user?.$id, onClose]);
+
+  // 处理传入的 offer（来电）
+  useEffect(() => {
+    if (incomingOffer && mode === 'incoming' && isServiceInitialized && voiceServiceRef.current) {
+      console.log('📞 处理来电 offer - 设置状态为ringing');
+      console.log('📞 来电者信息:', targetUser);
+      setCallStatus('ringing');
+    }
+  }, [incomingOffer, mode, isServiceInitialized, targetUser]);
+
+  // 如果是来电模式，直接设置为ringing状态，不需要等待服务初始化
+  useEffect(() => {
+    if (mode === 'incoming' && isOpen) {
+      console.log('📞 来电模式 - 立即设置为ringing状态');
+      console.log('📞 来电者:', targetUser);
+      setCallStatus('ringing');
+    }
+  }, [mode, isOpen, targetUser]);
+
+  // 开始通话计时器
+  const startCallTimer = () => {
+    if (callTimerRef.current) {
+      clearInterval(callTimerRef.current);
+    }
+    callTimerRef.current = setInterval(() => {
+      setCallDuration(prev => prev + 1);
+    }, 1000);
+  };
+
+  // 停止通话计时器
+  const stopCallTimer = () => {
+    if (callTimerRef.current) {
+      clearInterval(callTimerRef.current);
+      callTimerRef.current = null;
+    }
+  };
+
+  // 格式化通话时长
+  const formatDuration = (seconds: number): string => {
+    const mins = Math.floor(seconds / 60);
+    const secs = seconds % 60;
+    return `${mins.toString().padStart(2, '0')}:${secs.toString().padStart(2, '0')}`;
+  };
+
+  // 发起通话
+  const handleStartCall = async () => {
+    if (!voiceServiceRef.current || !isServiceInitialized) {
+      setError('语音通话服务未初始化');
+      return;
+    }
+
+    try {
+      await voiceServiceRef.current.initiateCall(targetUser.id);
+    } catch (error: any) {
+      console.error('发起通话失败:', error);
+      setError(error.message || '发起通话失败');
+    }
+  };
+
+  // 接听通话
+  const handleAnswerCall = async () => {
+    console.log('🎯 开始接听通话流程');
+    console.log('🔍 当前状态检查:', {
+      voiceServiceRef: !!voiceServiceRef.current,
+      isServiceInitialized,
+      incomingOffer: !!incomingOffer,
+      targetUser,
+      mode,
+      callStatus
+    });
+
+    if (!voiceServiceRef.current) {
+      const errorMsg = '语音服务未初始化';
+      console.error('❌', errorMsg);
+      setError(errorMsg);
+      return;
+    }
+
+    if (!isServiceInitialized) {
+      const errorMsg = '语音服务未完成初始化';
+      console.error('❌', errorMsg);
+      setError(errorMsg);
+      return;
+    }
+
+    if (!incomingOffer) {
+      const errorMsg = '没有收到来电offer信息';
+      console.error('❌', errorMsg);
+      setError(errorMsg);
+      return;
+    }
+
+    try {
+      console.log('📞 开始调用answerCall方法');
+      console.log('📞 参数:', { targetUserId: targetUser.id, offer: incomingOffer });
+      
+      setError(null); // 清除之前的错误
+      await voiceServiceRef.current.answerCall(targetUser.id, incomingOffer);
+      
+      console.log('✅ answerCall调用成功');
+    } catch (error: any) {
+      console.error('❌ 接听通话失败:', error);
+      console.error('❌ 错误详情:', {
+        name: error.name,
+        message: error.message,
+        stack: error.stack
+      });
+      setError(error.message || '接听通话失败');
+    }
+  };
+
+  // 拒绝通话
+  const handleRejectCall = async () => {
+    if (!voiceServiceRef.current || !isServiceInitialized) {
+      return;
+    }
+
+    try {
+      await voiceServiceRef.current.rejectCall(targetUser.id);
+    } catch (error: any) {
+      console.error('拒绝通话失败:', error);
+    }
+    onClose();
+  };
+
+  // 结束通话
+  const handleEndCall = async () => {
+    if (!voiceServiceRef.current) {
+      return;
+    }
+
+    try {
+      await voiceServiceRef.current.endCall();
+    } catch (error: any) {
+      console.error('结束通话失败:', error);
+    }
+  };
+
+  // 切换静音
+  const handleToggleMute = () => {
+    if (voiceServiceRef.current) {
+      const muted = voiceServiceRef.current.toggleMute();
+      setIsMuted(muted);
+    }
+  };
+
+  // 获取状态文本
+  const getStatusText = () => {
+    // 特殊处理来电模式
+    if (mode === 'incoming') {
+      switch (callStatus) {
+        case 'idle':
+        case 'ringing':
+          return '来电中，请选择接听或拒绝';
+        case 'connected':
+          return `通话中 ${formatDuration(callDuration)}`;
+        case 'ended':
+          return '通话已结束';
+        case 'rejected':
+          return '已拒绝通话';
+        case 'failed':
+          return '通话失败';
+        default:
+          return '收到来电';
+      }
+    }
+    
+    // 外拨模式的状态文本
+    switch (callStatus) {
+      case 'calling':
+        return '正在呼叫...';
+      case 'ringing':
+        return '等待接听...';
+      case 'connected':
+        return `通话中 ${formatDuration(callDuration)}`;
+      case 'ended':
+        return '通话已结束';
+      case 'rejected':
+        return '通话被拒绝';
+      case 'failed':
+        return '通话失败';
+      default:
+        return '准备中...';
+    }
+  };
+
+  // 获取状态颜色
+  const getStatusColor = () => {
+    switch (callStatus) {
+      case 'calling':
+      case 'ringing':
+        return 'text-yellow-500';
+      case 'connected':
+        return 'text-green-500';
+      case 'ended':
+        return 'text-gray-500';
+      case 'rejected':
+      case 'failed':
+        return 'text-red-500';
+      default:
+        return 'text-light-2';
+    }
+  };
+
+  // 自动发起通话（外拨模式）
+  useEffect(() => {
+    if (mode === 'outgoing' && callStatus === 'idle' && isServiceInitialized) {
+      handleStartCall();
+    }
+  }, [mode, callStatus, isServiceInitialized]);
+
+  if (!isOpen) return null;
+
+  // 调试信息
+  console.log('🎯 ImprovedVoiceCallModal 渲染状态:', {
+    isOpen,
+    mode,
+    callStatus,
+    targetUser,
+    isServiceInitialized,
+    incomingOffer: !!incomingOffer,
+    error
+  });
+
+  return (
+    <Dialog open={isOpen} onOpenChange={onClose}>
+      <DialogContent className="sm:max-w-md bg-dark-2 border-dark-4">
+        <div className="flex flex-col items-center space-y-6 p-6">
+          {/* 远程音频元素 */}
+          <audio 
+            ref={remoteAudioRef} 
+            autoPlay 
+            className="hidden"
+          />
+
+          {/* 用户头像 */}
+          <div className="relative">
+            {/* 背景光环效果 */}
+            {(callStatus === 'calling' || callStatus === 'ringing') && (
+              <div className="absolute inset-0 rounded-full bg-yellow-500/20 animate-ping" />
+            )}
+            {callStatus === 'connected' && (
+              <div className="absolute inset-0 rounded-full bg-green-500/20 animate-pulse" />
+            )}
+            
+            {/* 主头像 */}
+            <img
+              src={targetUser.avatar || '/assets/icons/profile-placeholder.svg'}
+              alt={targetUser.name}
+              className="relative w-32 h-32 rounded-full object-cover border-4 border-dark-4 shadow-2xl"
+              onError={(e) => {
+                // 如果头像加载失败，先尝试生成基于用户名的头像
+                console.log('📷 头像加载失败，原URL:', (e.target as HTMLImageElement).src);
+                const target = e.target as HTMLImageElement;
+                
+                if (target.src !== '/assets/icons/profile-placeholder.svg') {
+                  // 如果还没有尝试过用户名头像，先尝试生成一个
+                  if (targetUser.name && !target.src.includes('avatars/initials')) {
+                    const initialsUrl = `https://fra.cloud.appwrite.io/v1/avatars/initials?name=${encodeURIComponent(targetUser.name)}&project=6846b9f900368f67ddb4`;
+                    console.log('📷 尝试使用用户名生成头像:', initialsUrl);
+                    target.src = initialsUrl;
+                  } else {
+                    console.log('📷 使用默认头像');
+                    target.src = '/assets/icons/profile-placeholder.svg';
+                  }
+                }
+              }}
+              onLoad={() => {
+                console.log('📷 ✅ 头像加载成功:', targetUser.avatar);
+                console.log('📷 ✅ 显示的用户:', targetUser.name);
+              }}
+            />
+            
+            {/* 状态指示环 */}
+            <div className={`absolute inset-0 rounded-full border-4 transition-colors duration-300 ${
+              callStatus === 'calling' || callStatus === 'ringing' 
+                ? 'border-yellow-500 animate-pulse shadow-lg shadow-yellow-500/50' 
+                : callStatus === 'connected'
+                ? 'border-green-500 shadow-lg shadow-green-500/50'
+                : callStatus === 'failed' || callStatus === 'rejected'
+                ? 'border-red-500 shadow-lg shadow-red-500/50'
+                : 'border-gray-500'
+            }`} />
+            
+            {/* 通话状态图标 */}
+            {callStatus === 'ringing' && mode === 'incoming' && (
+              <div className="absolute -top-2 -right-2 w-10 h-10 bg-green-500 rounded-full flex items-center justify-center animate-bounce shadow-lg">
+                <span className="text-white text-lg">📞</span>
+              </div>
+            )}
+            
+            {callStatus === 'connected' && (
+              <div className="absolute -bottom-2 -right-2 w-10 h-10 bg-green-500 rounded-full flex items-center justify-center shadow-lg">
+                <span className="text-white text-lg">🔊</span>
+              </div>
+            )}
+            
+            {callStatus === 'calling' && (
+              <div className="absolute -top-2 -right-2 w-10 h-10 bg-yellow-500 rounded-full flex items-center justify-center animate-spin shadow-lg">
+                <span className="text-white text-lg">📱</span>
+              </div>
+            )}
+          </div>
+
+          {/* 用户信息 */}
+          <div className="text-center">
+            <DialogTitle className="text-2xl font-bold text-light-1 mb-2">
+              {targetUser.name}
+            </DialogTitle>
+            <DialogDescription className={`text-lg ${getStatusColor()}`}>
+              {getStatusText()}
+            </DialogDescription>
+            {error && (
+              <p className="text-red-500 text-sm mt-2">{error}</p>
+            )}
+          </div>
+
+          {/* 控制按钮 */}
+          <div className="flex space-x-4">
+            {/* 静音按钮 */}
+            {(callStatus === 'connected' || callStatus === 'calling') && (
+              <Button
+                variant="ghost"
+                size="icon"
+                className={`w-12 h-12 rounded-full ${
+                  isMuted ? 'bg-red-500 hover:bg-red-600' : 'bg-gray-600 hover:bg-gray-700'
+                }`}
+                onClick={handleToggleMute}
+              >
+                <span className="text-xl">{isMuted ? '🔇' : '🎤'}</span>
+              </Button>
+            )}
+
+            {/* 主要操作按钮 */}
+            {(callStatus === 'ringing' || callStatus === 'idle') && mode === 'incoming' ? (
+              <>
+                {/* 接听按钮 */}
+                <Button
+                  className="w-12 h-12 rounded-full bg-green-500 hover:bg-green-600"
+                  onClick={handleAnswerCall}
+                  disabled={!isServiceInitialized}
+                >
+                  <span className="text-xl">📞</span>
+                </Button>
+                {/* 拒绝按钮 */}
+                <Button
+                  className="w-12 h-12 rounded-full bg-red-500 hover:bg-red-600"
+                  onClick={handleRejectCall}
+                >
+                  <span className="text-xl">❌</span>
+                </Button>
+              </>
+            ) : (
+              /* 结束通话按钮 */
+              <Button
+                className="w-12 h-12 rounded-full bg-red-500 hover:bg-red-600"
+                onClick={handleEndCall}
+                disabled={callStatus === 'idle' || !isServiceInitialized}
+              >
+                <span className="text-xl">📞</span>
+              </Button>
+            )}
+          </div>
+
+          {/* 调试信息（开发环境） */}
+          {import.meta.env.DEV && (
+            <div className="text-xs text-gray-400 text-center">
+              <p>状态: {callStatus}</p>
+              <p>服务: {isServiceInitialized ? '已初始化' : '未初始化'}</p>
+              <p>模式: {mode}</p>
+            </div>
+          )}
+        </div>
+      </DialogContent>
+    </Dialog>
+  );
+};
+
+export default ImprovedVoiceCallModal;
