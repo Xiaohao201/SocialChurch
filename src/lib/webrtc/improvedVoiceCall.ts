@@ -127,8 +127,8 @@ export class ImprovedVoiceCallService {
       
       // 创建PeerConnection
       await this.createPeerConnection();
-      
-      // 添加本地流
+
+      // 添加本地流到PeerConnection
       this.addLocalStreamToPeerConnection();
       
       // 设置远程描述(offer)

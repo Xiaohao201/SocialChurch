@@ -11,7 +11,7 @@ import { useEffect, useState } from 'react'
 import { initializeDefaultMinistry, updateUserOnlineStatus } from './lib/appwrite/api'
 import { useUserContext } from './context/AuthContext'
 import { appwriteSignalingService } from './lib/webrtc/appwriteSignaling'
-import { CallMessage } from './lib/webrtc/improvedVoiceCall'
+import { BaseSignalMessage } from './lib/webrtc/signalingTypes'
 import ImprovedVoiceCallModal from './components/chat/ImprovedVoiceCallModal'
 
 
@@ -27,14 +27,14 @@ const App = () => {
   useEffect(() => {
     if (!user.$id) return;
 
-    const handleSignalingMessage = (message: CallMessage) => {
+    const handleSignalingMessage = (message: BaseSignalMessage) => {
       console.log('📞 App.tsx 收到信令消息:', message);
       
-      if (message.type === 'offer' && message.to === user.$id) {
+      if (message.type === 'offer' && message.to === user.$id && message.payload.sdp) {
         setIncomingCall({
           from: message.from,
-          fromName: message.callerName || '未知用户',
-          offer: message.payload!
+          fromName: message.payload.callerName || '未知用户',
+          offer: message.payload as RTCSessionDescriptionInit
         });
       }
     };
