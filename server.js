@@ -2,6 +2,17 @@ import 'dotenv/config';
 import express from 'express';
 import twilio from 'twilio';
 import cors from 'cors';
+import dotenv from 'dotenv';
+
+// 加载 .env 文件中的环境变量
+dotenv.config();
+
+// --- 调试代码 ---
+console.log('--- 环境变量诊断 ---');
+console.log('TWILIO_ACCOUNT_SID 是否已加载:', !!process.env.TWILIO_ACCOUNT_SID);
+console.log('TWILIO_AUTH_TOKEN 是否已加载:', !!process.env.TWILIO_AUTH_TOKEN);
+console.log('--- 诊断结束 ---');
+// --- 调试代码结束 ---
 
 const app = express();
 const port = 3001;
