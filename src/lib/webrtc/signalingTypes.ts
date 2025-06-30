@@ -1,6 +1,7 @@
 // 通用信令消息接口
 export interface BaseSignalMessage {
-  type: 'offer' | 'answer' | 'ice-candidate' | 'call-start' | 'call-end' | 'call-reject' | 'call-accept' | 'video-toggle' | 'audio-toggle';
+  // MODIFICATION: Removed 'call-accept' from the list of valid types.
+  type: 'offer' | 'answer' | 'ice-candidate' | 'call-start' | 'call-end' | 'call-reject' | 'video-toggle' | 'audio-toggle';
   payload?: any;
   from: string;
   to: string;
@@ -16,4 +17,4 @@ export interface CallMessage extends BaseSignalMessage {}
 export interface VideoCallMessage extends BaseSignalMessage {}
 
 // 统一的信令回调类型
-export type SignalingCallback = (message: BaseSignalMessage) => void; 
+export type SignalingCallback = (message: BaseSignalMessage) => void;

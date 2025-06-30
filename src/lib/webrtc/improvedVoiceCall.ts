@@ -151,12 +151,16 @@ export class ImprovedVoiceCallService {
         to: fromUserId
       });
 
-      // 发送接听确认
-      await this.sendSignalMessage({
-        type: 'call-accept',
-        from: this.currentUserId,
-        to: fromUserId
-      });
+      // MODIFICATION START: The redundant 'call-accept' message has been removed.
+      // The connection state will now be managed by the `onconnectionstatechange` event handler.
+      //
+      // REMOVED:
+      // await this.sendSignalMessage({
+      //   type: 'call-accept',
+      //   from: this.currentUserId,
+      //   to: fromUserId
+      // });
+      // MODIFICATION END
 
     } catch (error) {
       console.error('❌ 接听通话失败:', error);
@@ -251,14 +255,17 @@ export class ImprovedVoiceCallService {
           await this.handleIceCandidate(message.payload);
           break;
 
-        case 'call-accept':
-          if (this.callStatus === 'calling') {
-            this.updateCallStatus('connected');
-            this.clearConnectionTimeout();
-          } else {
-            console.log('⏭️ 跳过重复的call-accept消息');
-          }
-          break;
+        // MODIFICATION START: The 'call-accept' case is removed to prevent the race condition.
+        // REMOVED:
+        // case 'call-accept':
+        //   if (this.callStatus === 'calling') {
+        //     this.updateCallStatus('connected');
+        //     this.clearConnectionTimeout();
+        //   } else {
+        //     console.log('⏭️ 跳过重复的call-accept消息');
+        //   }
+        //   break;
+        // MODIFICATION END
 
         case 'call-reject':
           this.updateCallStatus('rejected');
@@ -563,4 +570,4 @@ export const defaultImprovedVoiceCallConfig: VoiceCallConfig = {
     //   credential: 'your-password'
     // }
   ]
-}; 
+};
