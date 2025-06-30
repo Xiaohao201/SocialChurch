@@ -43,7 +43,15 @@ const ImprovedVoiceCallModal: React.FC<ImprovedVoiceCallModalProps> = ({
       if (isOpen && user?.$id && !voiceServiceRef.current) {
         try {
           console.log('🚀 初始化改进的语音通话服务');
-          voiceServiceRef.current = new ImprovedVoiceCallService(defaultImprovedVoiceCallConfig);
+
+          const customConfig = {
+            iceServers: [
+              { urls: 'stun:stun.l.google.com:19302' },
+              { urls: 'stun:stun1.l.google.com:19302' },
+            ],
+          };
+
+          voiceServiceRef.current = new ImprovedVoiceCallService(customConfig);
           
           // 设置回调函数
           voiceServiceRef.current.setCallbacks({
