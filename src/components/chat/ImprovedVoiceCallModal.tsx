@@ -46,8 +46,24 @@ const ImprovedVoiceCallModal: React.FC<ImprovedVoiceCallModalProps> = ({
 
           const customConfig = {
             iceServers: [
+              // Public STUN servers - for address discovery
               { urls: 'stun:stun.l.google.com:19302' },
               { urls: 'stun:stun1.l.google.com:19302' },
+              { urls: 'stun:stun2.l.google.com:19302' },
+              { urls: 'stun:stun3.l.google.com:19302' },
+              { urls: 'stun:stun4.l.google.com:19302' },
+              { urls: 'stun:stun.services.mozilla.com' },
+
+              // A TURN server is needed for the most restrictive networks.
+              // Replace the following with your actual TURN server credentials.
+              // You can get TURN credentials from services like Twilio, Xirsys, etc.
+              /*
+              {
+                urls: 'turn:YOUR_TURN_SERVER_URL:3478',
+                username: 'YOUR_TURN_USERNAME',
+                credential: 'YOUR_TURN_PASSWORD',
+              },
+              */
             ],
           };
 
