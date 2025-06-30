@@ -2286,3 +2286,143 @@ export function getUserAvatarUrl(imageUrl: string | null | undefined): string {
         return '/assets/icons/profile-placeholder.svg';
     }
 }
+
+// ============================================================
+// CALL HISTORY
+// ============================================================
+
+export interface ICallRecord {
+  callerId: string;
+  receiverId: string;
+  callerName: string;
+  receiverName: string;
+  callerAvatar?: string;
+  receiverAvatar?: string;
+  status: 'completed' | 'missed' | 'rejected';
+  duration?: number;
+  initiatedAt: string;
+}
+
+// 创建通话记录
+export async function createCallRecord(callData: ICallRecord) {
+  try {
+    const newCallRecord = await databases.createDocument(
+      appwriteConfig.databaseId,
+      appwriteConfig.callHistoryCollectionId,
+      ID.unique(),
+      callData
+    );
+    console.log("📞 通话记录创建成功:", newCallRecord);
+    return newCallRecord;
+  } catch (error) {
+    console.error("创建通话记录失败:", error);
+    throw new Error("创建通话记录时出错");
+  }
+}
+
+// 获取用户的通话记录
+export async function getCallHistoryForUser(userId: string) {
+  try {
+    const response = await databases.listDocuments(
+      appwriteConfig.databaseId,
+      appwriteConfig.callHistoryCollectionId,
+      [
+        Query.or([
+          Query.equal('callerId', userId),
+          Query.equal('receiverId', userId)
+        ]),
+        Query.orderDesc('initiatedAt') // 按发起时间降序排序
+      ]
+    );
+    return response.documents;
+  } catch (error) {
+    console.error("获取通话记录失败:", error);
+    throw new Error("获取通话记录时出错");
+  }
+}
+
+// ============================================================
+// NOTIFICATIONS
+// ============================================================
+export interface IAppNotification {
+  userId: string;
+  type: 'missed_call' | 'new_message' | 'friend_request';
+  message: string;
+  relatedItemId?: string;
+  isRead: boolean;
+}
+
+// 创建通知
+export async function createNotification(notificationData: Omit<IAppNotification, 'isRead'>) {
+  try {
+    const newNotification = await databases.createDocument(
+      appwriteConfig.databaseId,
+      appwriteConfig.notificationCollectionId,
+      ID.unique(),
+      {
+        ...notificationData,
+        isRead: false, // 确保初始状态为未读
+      }
+    );
+    console.log("🔔 通知创建成功:", newNotification);
+    return newNotification;
+  } catch (error) {
+    console.error("创建通知失败:", error);
+    throw new Error("创建通知时出错");
+  }
+}
+
+// 获取用户未读通知数量
+export async function getUnreadNotificationsCount(userId: string) {
+  try {
+    const response = await databases.listDocuments(
+      appwriteConfig.databaseId,
+      appwriteConfig.notificationCollectionId,
+      [
+        Query.equal('userId', userId),
+        Query.equal('isRead', false),
+      ]
+    );
+    return response.total;
+  } catch (error) {
+    console.error("获取未读通知数量失败:", error);
+    return 0;
+  }
+}
+
+// 将通知标记为已读
+export async function markNotificationsAsRead(userId: string, type?: 'missed_call') {
+  try {
+    // 1. 先查询所有未读通知
+    const queries = [Query.equal('userId', userId), Query.equal('isRead', false)];
+    if (type) {
+      queries.push(Query.equal('type', type));
+    }
+
+    const response = await databases.listDocuments(
+      appwriteConfig.databaseId,
+      appwriteConfig.notificationCollectionId,
+      queries
+    );
+
+    // 2. 遍历并更新每一条为已读
+    const updatePromises = response.documents.map(doc => 
+      databases.updateDocument(
+        appwriteConfig.databaseId,
+        appwriteConfig.notificationCollectionId,
+        doc.$id,
+        { isRead: true }
+      )
+    );
+
+    await Promise.all(updatePromises);
+    console.log(`✅ ${response.documents.length} 条通知已标记为已读`);
+    
+  } catch (error) {
+    console.error("标记通知为已读失败:", error);
+  }
+}
+
+// ============================================================
+// SEARCH
+// ============================================================

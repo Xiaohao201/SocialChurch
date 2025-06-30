@@ -15,6 +15,7 @@ export const appwriteConfig = {
   chatCollectionId: import.meta.env.VITE_APPWRITE_CHAT_COLLECTION_ID || 'chats',
   messageCollectionId: import.meta.env.VITE_APPWRITE_MESSAGE_COLLECTION_ID || 'messages',
   signalCollectionId: import.meta.env.VITE_APPWRITE_SIGNAL_COLLECTION_ID || 'signals',
+  callHistoryCollectionId: import.meta.env.VITE_APPWRITE_CALL_HISTORY_COLLECTION_ID,
 }
 
 // 在开发环境中打印配置信息

@@ -1,5 +1,5 @@
 import { Routes, Route, Navigate } from 'react-router-dom'
-import { Profile, UpdateProfile, ModernChat } from './_root/pages'
+import { Profile, UpdateProfile, CallHistory, Home } from './_root/pages'
 import './globals.css'
 import SigninForm from './_auth/forms/SigninForm'
 import AuthLayout from './_auth/AuthLayout'
@@ -88,11 +88,13 @@ const App = () => {
 
         {/* private routes */}
         <Route element={<AuthGuard><RootLayout /></AuthGuard>}>
-          <Route index element={<Navigate to="/home" />} />
-          <Route path="/home" element={<ModernChat />} />
-          <Route path="/profile/:id" element={<Profile />} />
+          <Route index element={<Home />} />
+          <Route path="/home" element={<Home />} />
+          <Route path="/profile/:id/*" element={<Profile />} />
           <Route path="/update-profile/:id" element={<UpdateProfile />} />
-          <Route path="/chat" element={<ModernChat />} />
+          <Route path="/change-password" element={<ChangePasswordForm />} />
+          <Route path="/call-history" element={<CallHistory />} />
+          <Route path="/chat" element={<Home />} />
         </Route>
       </Routes>
 

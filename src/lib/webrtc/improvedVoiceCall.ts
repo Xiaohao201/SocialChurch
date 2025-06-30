@@ -1,7 +1,10 @@
 import { appwriteSignalingService } from './appwriteSignaling';
 import { CallMessage } from './signalingTypes';
+import { createCallRecord, ICallRecord, getUserById, createNotification } from '@/lib/appwrite/api';
 
 export type { CallMessage } from './signalingTypes';
+
+export type NetworkQuality = 'good' | 'average' | 'poor' | 'unknown';
 
 export interface VoiceCallConfig {
   iceServers: RTCIceServer[];
@@ -17,15 +20,20 @@ export class ImprovedVoiceCallService {
   private currentUserId: string = '';
   private targetUserId: string = '';
   private callStatus: CallStatus = 'idle';
+  private callStartTime: number | null = null;
+  private networkStatsTimer?: NodeJS.Timeout;
   
   // 当前用户信息
-  private currentUserInfo: { name?: string; avatar?: string } = {};
+  private currentUserInfo: { id: string; name?: string; avatar?: string } = { id: '' };
+  // 目标用户信息
+  private targetUserInfo: { id: string; name?: string; avatar?: string } = { id: '' };
 
   // 回调函数
   private onStatusChange?: (status: CallStatus) => void;
   private onRemoteStream?: (stream: MediaStream) => void;
   private onError?: (error: Error) => void;
   private onIncomingCall?: (fromUserId: string, callerInfo: { userId: string; offer: RTCSessionDescriptionInit; callerName?: string; callerAvatar?: string }) => void;
+  private onNetworkQualityChange?: (quality: NetworkQuality) => void;
 
   // 状态追踪
   private iceCandidatesQueue: RTCIceCandidateInit[] = [];
@@ -38,10 +46,12 @@ export class ImprovedVoiceCallService {
   }
 
   // 初始化用户
-  async initializeUser(userId: string): Promise<void> {
+  async initializeUser(userId: string, userInfo: { name?: string; avatar?: string }): Promise<void> {
     this.currentUserId = userId;
+    this.currentUserInfo = { id: userId, ...userInfo };
     await appwriteSignalingService.registerUser(userId, this.handleSignalMessage.bind(this));
     this.setupSignalingCallbacks();
+    console.log('📝 当前用户信息已设置:', this.currentUserInfo);
   }
 
   // 设置回调函数
@@ -50,27 +60,30 @@ export class ImprovedVoiceCallService {
     onRemoteStream?: (stream: MediaStream) => void;
     onError?: (error: Error) => void;
     onIncomingCall?: (fromUserId: string, callerInfo: { userId: string; offer: RTCSessionDescriptionInit; callerName?: string; callerAvatar?: string }) => void;
+    onNetworkQualityChange?: (quality: NetworkQuality) => void;
   }): void {
     this.onStatusChange = callbacks.onStatusChange;
     this.onRemoteStream = callbacks.onRemoteStream;
     this.onError = callbacks.onError;
     this.onIncomingCall = callbacks.onIncomingCall;
+    this.onNetworkQualityChange = callbacks.onNetworkQualityChange;
   }
 
-  // 设置当前用户信息
+  // 设置当前用户信息 (此方法可被 initializeUser 替代)
   setCurrentUserInfo(userInfo: { name?: string; avatar?: string }): void {
-    this.currentUserInfo = userInfo;
+    this.currentUserInfo = { ...this.currentUserInfo, ...userInfo };
     console.log('📝 设置当前用户信息:', this.currentUserInfo);
   }
 
   // 发起语音通话
-  async initiateCall(targetUserId: string): Promise<void> {
+  async initiateCall(targetUser: { id: string; name?: string; avatar?: string }): Promise<void> {
     try {
-      this.targetUserId = targetUserId;
+      this.targetUserId = targetUser.id;
+      this.targetUserInfo = targetUser; // 保存目标用户信息
       this.isInitiator = true;
       this.updateCallStatus('calling');
 
-      console.log(`📞 向用户 ${targetUserId} 发起语音通话`);
+      console.log(`📞 向用户 ${targetUser.id} 发起语音通话`);
       console.log('📝 当前用户信息:', this.currentUserInfo);
 
       // 获取用户媒体
@@ -96,7 +109,7 @@ export class ImprovedVoiceCallService {
         type: 'offer' as const,
         payload: offer,
         from: this.currentUserId,
-        to: targetUserId,
+        to: this.targetUserId,
         callerName: this.currentUserInfo.name,
         callerAvatar: this.currentUserInfo.avatar
       };
@@ -114,13 +127,19 @@ export class ImprovedVoiceCallService {
   }
 
   // 接听来电
-  async answerCall(fromUserId: string, offer: RTCSessionDescriptionInit): Promise<void> {
+  async answerCall(callerInfo: { userId: string; offer: RTCSessionDescriptionInit; callerName?: string; callerAvatar?: string }): Promise<void> {
     try {
-      this.targetUserId = fromUserId;
+      this.targetUserId = callerInfo.userId;
+      // 接听时，我们可能没有完整的用户信息，先根据信令中的信息设置
+      this.targetUserInfo = { 
+        id: callerInfo.userId, 
+        name: callerInfo.callerName, 
+        avatar: callerInfo.callerAvatar 
+      };
       this.isInitiator = false;
       this.updateCallStatus('ringing');
 
-      console.log(`📞 接听来自用户 ${fromUserId} 的语音通话`);
+      console.log(`📞 接听来自用户 ${this.targetUserId} 的语音通话`);
 
       // 获取用户媒体
       await this.getUserMedia();
@@ -132,7 +151,7 @@ export class ImprovedVoiceCallService {
       this.addLocalStreamToPeerConnection();
       
       // 设置远程描述(offer)
-      await this.peerConnection!.setRemoteDescription(new RTCSessionDescription(offer));
+      await this.peerConnection!.setRemoteDescription(new RTCSessionDescription(callerInfo.offer));
       console.log('✅ 设置远程描述(offer)成功');
 
       // 处理队列中的ICE候选
@@ -148,19 +167,8 @@ export class ImprovedVoiceCallService {
         type: 'answer',
         payload: answer,
         from: this.currentUserId,
-        to: fromUserId
+        to: this.targetUserId
       });
-
-      // MODIFICATION START: The redundant 'call-accept' message has been removed.
-      // The connection state will now be managed by the `onconnectionstatechange` event handler.
-      //
-      // REMOVED:
-      // await this.sendSignalMessage({
-      //   type: 'call-accept',
-      //   from: this.currentUserId,
-      //   to: fromUserId
-      // });
-      // MODIFICATION END
 
     } catch (error) {
       console.error('❌ 接听通话失败:', error);
@@ -170,12 +178,21 @@ export class ImprovedVoiceCallService {
 
   // 拒绝来电
   async rejectCall(fromUserId: string): Promise<void> {
+    // 拒绝时，我们不知道对方的完整信息，但我们需要记录
+    const caller = await getUserById(fromUserId);
+    this.targetUserInfo = {
+      id: fromUserId,
+      name: caller?.name,
+      avatar: caller?.imageUrl
+    };
+
     await this.sendSignalMessage({
       type: 'call-reject',
       from: this.currentUserId,
       to: fromUserId
     });
     this.updateCallStatus('rejected');
+    this.cleanup(); // 拒绝后也应清理并记录
   }
 
   // 结束通话
@@ -193,13 +210,22 @@ export class ImprovedVoiceCallService {
 
   // 切换静音状态
   toggleMute(): boolean {
-    if (this.localStream) {
-      const audioTrack = this.localStream.getAudioTracks()[0];
-      if (audioTrack) {
-        audioTrack.enabled = !audioTrack.enabled;
-        return !audioTrack.enabled; // 返回是否静音
-      }
+    if (!this.peerConnection || !this.localStream) {
+      console.warn("无法切换静音，通话未连接或本地流不存在。");
+      return false;
     }
+
+    const senders = this.peerConnection.getSenders();
+    const audioSender = senders.find(sender => sender.track?.kind === 'audio');
+
+    if (audioSender && audioSender.track) {
+      const currentMuteState = !audioSender.track.enabled;
+      audioSender.track.enabled = !audioSender.track.enabled;
+      console.log(`🎤 麦克风已 ${audioSender.track.enabled ? '取消静音' : '静音'}`);
+      return audioSender.track.enabled === false; // 返回是否已静音
+    }
+    
+    console.warn("未找到音频轨道，无法切换静音。");
     return false;
   }
 
@@ -254,18 +280,6 @@ export class ImprovedVoiceCallService {
         case 'ice-candidate':
           await this.handleIceCandidate(message.payload);
           break;
-
-        // MODIFICATION START: The 'call-accept' case is removed to prevent the race condition.
-        // REMOVED:
-        // case 'call-accept':
-        //   if (this.callStatus === 'calling') {
-        //     this.updateCallStatus('connected');
-        //     this.clearConnectionTimeout();
-        //   } else {
-        //     console.log('⏭️ 跳过重复的call-accept消息');
-        //   }
-        //   break;
-        // MODIFICATION END
 
         case 'call-reject':
           this.updateCallStatus('rejected');
@@ -452,17 +466,28 @@ export class ImprovedVoiceCallService {
 
   // 更新通话状态
   private updateCallStatus(status: CallStatus): void {
+    // 只有在状态真实改变时才触发
+    if (this.callStatus === status) return;
+    
     this.callStatus = status;
     console.log(`📱 通话状态更新: ${status}`);
     if (this.onStatusChange) {
       this.onStatusChange(status);
+    }
+
+    // 在通话连接时记录开始时间并启动网络监测
+    if (status === 'connected') {
+      this.callStartTime = Date.now();
+      this.startNetworkQualityCheck();
+    } else {
+      // 在通话结束时停止网络监测
+      this.stopNetworkQualityCheck();
     }
   }
 
   // 设置连接超时
   private setConnectionTimeout(): void {
     this.connectionTimeout = setTimeout(() => {
-      console.log('⏰ 连接超时');
       this.handleError(new Error('连接超时'));
     }, 30000); // 30秒超时
   }
@@ -475,26 +500,81 @@ export class ImprovedVoiceCallService {
     }
   }
 
+  // 开始网络质量检测
+  private startNetworkQualityCheck(): void {
+    if (this.networkStatsTimer) {
+      clearInterval(this.networkStatsTimer);
+    }
+    this.networkStatsTimer = setInterval(async () => {
+      if (!this.peerConnection || this.peerConnection.connectionState !== 'connected') {
+        this.stopNetworkQualityCheck();
+        return;
+      }
+
+      try {
+        const stats = await this.peerConnection.getStats();
+        let rtt = -1;
+        let packetsLost = -1;
+
+        stats.forEach(report => {
+          if (report.type === 'remote-inbound-rtp' && report.roundTripTime !== undefined) {
+             rtt = report.roundTripTime * 1000; // convert to ms
+          }
+          if (report.type === 'remote-inbound-rtp' && report.packetsLost !== undefined) {
+            packetsLost = report.packetsLost;
+          }
+        });
+        
+        let quality: NetworkQuality = 'unknown';
+        if (rtt !== -1) {
+          if (rtt < 150 && packetsLost < 5) {
+            quality = 'good';
+          } else if (rtt < 300 && packetsLost < 10) {
+            quality = 'average';
+          } else {
+            quality = 'poor';
+          }
+        }
+        
+        if (this.onNetworkQualityChange) {
+          this.onNetworkQualityChange(quality);
+        }
+
+      } catch (error) {
+        console.warn("获取网络状态失败:", error);
+      }
+    }, 5000); // 每5秒检测一次
+  }
+
+  // 停止网络质量检测
+  private stopNetworkQualityCheck(): void {
+    if (this.networkStatsTimer) {
+      clearInterval(this.networkStatsTimer);
+      this.networkStatsTimer = undefined;
+    }
+    // 通知UI停止显示
+    if(this.onNetworkQualityChange) {
+      this.onNetworkQualityChange('unknown');
+    }
+  }
+
   // 错误处理
   private handleError(error: Error): void {
-    console.error('❌ 语音通话错误:', error);
-    
-    // 只有在通话未结束时才设置为失败状态
-    if (this.callStatus !== 'ended' && this.callStatus !== 'failed') {
-      this.updateCallStatus('failed');
-    }
-    
-    this.cleanup();
-    
+    console.error(`❌ 语音通话错误:`, error);
     if (this.onError) {
       this.onError(error);
     }
+    this.updateCallStatus('failed');
+    this.cleanup();
   }
 
   // 清理资源
   private cleanup(): void {
     console.log('🧹 清理语音通话资源');
-    
+
+    // 在清理时创建通话记录
+    this.createCallHistoryEntry();
+
     this.clearConnectionTimeout();
     
     if (this.localStream) {
@@ -509,12 +589,63 @@ export class ImprovedVoiceCallService {
     
     this.remoteStream = null;
     this.iceCandidatesQueue = [];
-    this.targetUserId = '';
     this.isInitiator = false;
+    this.callStartTime = null;
+    this.stopNetworkQualityCheck(); // 确保清理时停止检测
+    // 不重置 currentUserId 和 currentUserInfo
+    this.targetUserId = '';
+    this.targetUserInfo = { id: '' };
+  }
+
+  private async createCallHistoryEntry(): Promise<void> {
+    // 只有在通话状态为 'ended', 'rejected', 'failed' 时才创建记录
+    // 'failed' 状态可以理解为 'missed'
+    const finalStatus = this.callStatus;
+    if (!['ended', 'rejected', 'failed'].includes(finalStatus) || !this.targetUserId) {
+      return;
+    }
+
+    // 'failed' 并且是发起方，说明对方未接听，状态为 'missed'
+    const recordStatus = (finalStatus === 'failed' && this.isInitiator) ? 'missed' : 
+                         (finalStatus === 'ended') ? 'completed' : 'rejected';
+
+    let duration = 0;
+    if (this.callStartTime && finalStatus === 'ended') {
+      duration = Math.round((Date.now() - this.callStartTime) / 1000);
+    }
+
+    const callData: ICallRecord = {
+      callerId: this.isInitiator ? this.currentUserInfo.id : this.targetUserInfo.id,
+      receiverId: this.isInitiator ? this.targetUserInfo.id : this.currentUserInfo.id,
+      callerName: this.isInitiator ? this.currentUserInfo.name || '未知用户' : this.targetUserInfo.name || '未知用户',
+      receiverName: this.isInitiator ? this.targetUserInfo.name || '未知用户' : this.currentUserInfo.name || '未知用户',
+      callerAvatar: this.isInitiator ? this.currentUserInfo.avatar : this.targetUserInfo.avatar,
+      receiverAvatar: this.isInitiator ? this.targetUserInfo.avatar : this.currentUserInfo.avatar,
+      status: recordStatus,
+      duration: duration,
+      initiatedAt: new Date().toISOString(),
+    };
+    
+    console.log('✍️ 准备创建通话记录:', callData);
+    const newCallRecord = await createCallRecord(callData);
+
+    // 如果是未接或被拒绝的电话，为被叫方创建通知
+    if ((recordStatus === 'missed' || recordStatus === 'rejected') && newCallRecord) {
+      const receiverId = this.isInitiator ? this.targetUserInfo.id : this.currentUserInfo.id;
+      const callerName = this.isInitiator ? this.currentUserInfo.name : this.targetUserInfo.name;
+
+      await createNotification({
+        userId: receiverId,
+        type: 'missed_call',
+        message: `您错过了来自 ${callerName || '未知用户'} 的一通电话`,
+        relatedItemId: newCallRecord.$id,
+      });
+    }
   }
 
   // 销毁服务
   destroy(): void {
+    console.log('💥 销毁语音通话服务实例');
     this.cleanup();
     if (this.currentUserId) {
       appwriteSignalingService.unregisterUser(this.currentUserId, this.handleSignalMessage.bind(this));

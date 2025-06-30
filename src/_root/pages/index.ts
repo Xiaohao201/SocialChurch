@@ -1,3 +1,5 @@
+export { default as Home } from './ModernChat'
 export { default as Profile } from './Profile'
 export { default as UpdateProfile } from './UpdateProfile'
-export { default as ModernChat } from './ModernChat'
+export { default as ChangePasswordForm } from '@/_auth/forms/ChangePasswordForm'
+export { default as CallHistory } from './CallHistory'

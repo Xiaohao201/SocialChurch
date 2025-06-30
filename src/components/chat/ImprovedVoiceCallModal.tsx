@@ -1,9 +1,39 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { Button } from '@/components/ui/button';
 import { Dialog, DialogContent, DialogTitle, DialogDescription } from '@/components/ui/dialog';
-import { ImprovedVoiceCallService, CallStatus, defaultImprovedVoiceCallConfig } from '@/lib/webrtc/improvedVoiceCall';
+import { ImprovedVoiceCallService, CallStatus, defaultImprovedVoiceCallConfig, NetworkQuality } from '@/lib/webrtc/improvedVoiceCall';
 import { useUserContext } from '@/context/AuthContext';
 import { getUserAvatarUrl } from '@/lib/appwrite/api';
+import Loader from '../shared/Loader';
+import { Wifi, WifiOff } from 'lucide-react';
+
+// 图标
+const PhoneHangupIcon = () => (
+  <svg xmlns="http://www.w3.org/2000/svg" width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+    <path d="M22 16.92v3a2 2 0 0 1-2.18 2 19.79 19.79 0 0 1-8.63-3.07 19.5 19.5 0 0 1-6-6 19.79 19.79 0 0 1-3.07-8.67A2 2 0 0 1 4.11 2h3a2 2 0 0 1 2 1.72 12.84 12.84 0 0 0 .7 2.81 2 2 0 0 1-.45 2.11L8.09 9.91a16 16 0 0 0 6 6l1.27-1.27a2 2 0 0 1 2.11-.45 12.84 12.84 0 0 0 2.81.7A2 2 0 0 1 22 16.92z" transform="rotate(135 12 12)"></path>
+  </svg>
+);
+
+const PhoneIcon = () => (
+  <svg xmlns="http://www.w3.org/2000/svg" width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+    <path d="M22 16.92v3a2 2 0 0 1-2.18 2 19.79 19.79 0 0 1-8.63-3.07 19.5 19.5 0 0 1-6-6 19.79 19.79 0 0 1-3.07-8.67A2 2 0 0 1 4.11 2h3a2 2 0 0 1 2 1.72 12.84 12.84 0 0 0 .7 2.81 2 2 0 0 1-.45 2.11L8.09 9.91a16 16 0 0 0 6 6l1.27-1.27a2 2 0 0 1 2.11-.45 12.84 12.84 0 0 0 2.81.7A2 2 0 0 1 22 16.92z"></path>
+  </svg>
+);
+
+const MuteIcon = () => (
+  <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="h-6 w-6 text-white">
+    <path d="m12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3Z"></path>
+    <path d="M19 10v1a7 7 0 0 1-14 0v-1"></path>
+    <line x1="1" y1="1" x2="23" y2="23"></line>
+  </svg>
+);
+
+const UnmuteIcon = () => (
+  <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="h-6 w-6 text-white">
+    <path d="M12 2a3 3 0 0 0-3 3v7a3 3 0 0 0 6 0V5a3 3 0 0 0-3-3Z"></path>
+    <path d="M19 10v2a7 7 0 0 1-14 0v-2"></path>
+  </svg>
+);
 
 // Function to fetch TURN credentials from your backend
 const fetchTurnCredentials = async () => {
@@ -33,6 +63,27 @@ interface ImprovedVoiceCallModalProps {
   onIncomingCall?: (fromUserId: string, callerInfo: { userId: string; offer: RTCSessionDescriptionInit; callerName?: string; callerAvatar?: string }) => void;
 }
 
+const NetworkStatusIndicator: React.FC<{ quality: NetworkQuality }> = ({ quality }) => {
+  if (quality === 'unknown') {
+    return null;
+  }
+
+  const qualityMap = {
+    good: { text: '网络良好', color: 'text-green-500' },
+    average: { text: '网络一般', color: 'text-yellow-500' },
+    poor: { text: '网络较差', color: 'text-red-500' },
+  };
+
+  const { text, color } = qualityMap[quality];
+
+  return (
+    <div className={`flex items-center gap-1 text-xs ${color}`}>
+      <Wifi size={14} />
+      <span>{text}</span>
+    </div>
+  );
+};
+
 const ImprovedVoiceCallModal: React.FC<ImprovedVoiceCallModalProps> = ({
   isOpen,
   onClose,
@@ -46,6 +97,7 @@ const ImprovedVoiceCallModal: React.FC<ImprovedVoiceCallModalProps> = ({
   const [isMuted, setIsMuted] = useState(false);
   const [callDuration, setCallDuration] = useState(0);
   const [error, setError] = useState<string | null>(null);
+  const [networkQuality, setNetworkQuality] = useState<NetworkQuality>('unknown');
   
   const voiceServiceRef = useRef<ImprovedVoiceCallService | null>(null);
   const remoteAudioRef = useRef<HTMLAudioElement>(null);
@@ -106,24 +158,19 @@ const ImprovedVoiceCallModal: React.FC<ImprovedVoiceCallModalProps> = ({
               if (onIncomingCall) {
                 onIncomingCall(fromUserId, callerInfo);
               }
+            },
+            onNetworkQualityChange: (quality) => {
+              setNetworkQuality(quality);
             }
           });
 
           // 初始化用户
-          await voiceServiceRef.current.initializeUser(user.$id);
-          
-          // 设置当前用户信息
-          const userInfo = {
+          const currentUserInfo = {
+            id: user.$id,
             name: user.name || '未知用户',
-            avatar: getUserAvatarUrl(user.imageUrl) // 使用专门的函数处理头像URL
+            avatar: getUserAvatarUrl(user.imageUrl)
           };
-          
-          console.log('📝 设置当前用户信息:', userInfo);
-          console.log('🖼️ 原始用户头像URL:', user.imageUrl);
-          console.log('🖼️ 处理后的头像URL:', userInfo.avatar);
-          console.log('👤 完整用户对象:', user);
-          
-          voiceServiceRef.current.setCurrentUserInfo(userInfo);
+          await voiceServiceRef.current.initializeUser(user.$id, currentUserInfo);
           
           setIsServiceInitialized(true);
           console.log('✅ 语音通话服务初始化完成');
@@ -142,6 +189,7 @@ const ImprovedVoiceCallModal: React.FC<ImprovedVoiceCallModalProps> = ({
         voiceServiceRef.current.destroy();
         voiceServiceRef.current = null;
         setIsServiceInitialized(false);
+        setIsMuted(false); // 重置静音状态
       }
       stopCallTimer();
     };
@@ -198,7 +246,13 @@ const ImprovedVoiceCallModal: React.FC<ImprovedVoiceCallModalProps> = ({
     }
 
     try {
-      await voiceServiceRef.current.initiateCall(targetUser.id);
+      // 确保传递完整的 targetUser 对象
+      const fullTargetUser = {
+        id: targetUser.id,
+        name: targetUser.name,
+        avatar: getUserAvatarUrl(targetUser.avatar)
+      };
+      await voiceServiceRef.current.initiateCall(fullTargetUser);
     } catch (error: any) {
       console.error('发起通话失败:', error);
       setError(error.message || '发起通话失败');
@@ -240,10 +294,16 @@ const ImprovedVoiceCallModal: React.FC<ImprovedVoiceCallModalProps> = ({
 
     try {
       console.log('📞 开始调用answerCall方法');
-      console.log('📞 参数:', { targetUserId: targetUser.id, offer: incomingOffer });
+      
+      const callerInfo = {
+        userId: targetUser.id,
+        offer: incomingOffer,
+        callerName: targetUser.name,
+        callerAvatar: getUserAvatarUrl(targetUser.avatar)
+      };
       
       setError(null); // 清除之前的错误
-      await voiceServiceRef.current.answerCall(targetUser.id, incomingOffer);
+      await voiceServiceRef.current.answerCall(callerInfo);
       
       console.log('✅ answerCall调用成功');
     } catch (error: any) {
@@ -259,14 +319,8 @@ const ImprovedVoiceCallModal: React.FC<ImprovedVoiceCallModalProps> = ({
 
   // 拒绝通话
   const handleRejectCall = async () => {
-    if (!voiceServiceRef.current || !isServiceInitialized) {
-      return;
-    }
-
-    try {
+    if (voiceServiceRef.current) {
       await voiceServiceRef.current.rejectCall(targetUser.id);
-    } catch (error: any) {
-      console.error('拒绝通话失败:', error);
     }
     onClose();
   };
@@ -287,8 +341,8 @@ const ImprovedVoiceCallModal: React.FC<ImprovedVoiceCallModalProps> = ({
   // 切换静音
   const handleToggleMute = () => {
     if (voiceServiceRef.current) {
-      const muted = voiceServiceRef.current.toggleMute();
-      setIsMuted(muted);
+      const newMuteState = voiceServiceRef.current.toggleMute();
+      setIsMuted(newMuteState);
     }
   };
 
@@ -463,49 +517,46 @@ const ImprovedVoiceCallModal: React.FC<ImprovedVoiceCallModalProps> = ({
             )}
           </div>
 
-          {/* 控制按钮 */}
-          <div className="flex space-x-4">
-            {/* 静音按钮 */}
-            {(callStatus === 'connected' || callStatus === 'calling') && (
+          {/* 通话状态和时长 */}
+          <div className="text-center mt-2">
+            <p className={`text-sm ${getStatusColor()}`}>{getStatusText()}</p>
+            {callStatus === 'connected' && (
+              <div className="flex items-center justify-center gap-x-4 mt-1">
+                <p className="text-sm text-gray-300">{formatDuration(callDuration)}</p>
+                <NetworkStatusIndicator quality={networkQuality} />
+              </div>
+            )}
+          </div>
+
+          {/* 通话控制按钮 */}
+          <div className="flex items-center justify-center gap-x-6 mt-8">
+            {/* 静音按钮 - 仅在通话连接时显示 */}
+            {callStatus === 'connected' && (
               <Button
-                variant="ghost"
-                size="icon"
-                className={`w-12 h-12 rounded-full ${
-                  isMuted ? 'bg-red-500 hover:bg-red-600' : 'bg-gray-600 hover:bg-gray-700'
-                }`}
                 onClick={handleToggleMute}
+                className="rounded-full w-16 h-16 flex items-center justify-center bg-white/20 hover:bg-white/30 transition-colors"
               >
-                <span className="text-xl">{isMuted ? '🔇' : '🎤'}</span>
+                {isMuted ? <MuteIcon /> : <UnmuteIcon />}
               </Button>
             )}
 
-            {/* 主要操作按钮 */}
-            {(callStatus === 'ringing' || callStatus === 'idle') && mode === 'incoming' ? (
-              <>
-                {/* 接听按钮 */}
-                <Button
-                  className="w-12 h-12 rounded-full bg-green-500 hover:bg-green-600"
-                  onClick={handleAnswerCall}
-                  disabled={!isServiceInitialized}
-                >
-                  <span className="text-xl">📞</span>
-                </Button>
-                {/* 拒绝按钮 */}
-                <Button
-                  className="w-12 h-12 rounded-full bg-red-500 hover:bg-red-600"
-                  onClick={handleRejectCall}
-                >
-                  <span className="text-xl">❌</span>
-                </Button>
-              </>
-            ) : (
-              /* 结束通话按钮 */
+            {/* 挂断按钮 */}
+            {['calling', 'ringing', 'connected'].includes(callStatus) && (
               <Button
-                className="w-12 h-12 rounded-full bg-red-500 hover:bg-red-600"
                 onClick={handleEndCall}
-                disabled={callStatus === 'idle' || !isServiceInitialized}
+                className="rounded-full w-16 h-16 flex items-center justify-center bg-red-500 hover:bg-red-600 transition-colors"
               >
-                <span className="text-xl">📞</span>
+                <PhoneHangupIcon />
+              </Button>
+            )}
+
+            {/* 接听按钮 */}
+            {callStatus === 'ringing' && (
+              <Button
+                onClick={handleAnswerCall}
+                className="rounded-full w-16 h-16 flex items-center justify-center bg-green-500 hover:bg-green-600 transition-colors"
+              >
+                <PhoneIcon />
               </Button>
             )}
           </div>

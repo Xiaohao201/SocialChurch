@@ -1,17 +1,38 @@
 import { useUserContext } from '@/context/AuthContext';
 import { INavLink } from '@/types';
-import React, { useEffect } from 'react'
+import React, { useEffect, useState } from 'react'
 import { Link, NavLink, useLocation, useNavigate } from 'react-router-dom'
 import { sidebarLinks } from '../constants';
 import { Button } from '../ui/button';
 import { useSignOutAccount } from '@/lib/react-query/queriesAndMutations';
+import { getUnreadNotificationsCount, markNotificationsAsRead } from '@/lib/appwrite/api';
 
 const LeftSidebar = () => {
     const { user, setUser, setIsAuthenticated } = useUserContext();
     const navigate = useNavigate();
     const { pathname } = useLocation();
     const { mutate: signOut, isSuccess } = useSignOutAccount();
+    const [unreadCount, setUnreadCount] = useState(0);
 
+    const fetchUnreadCount = async () => {
+        if (user.id) {
+            const count = await getUnreadNotificationsCount(user.id!);
+            setUnreadCount(count);
+        }
+    };
+
+    useEffect(() => {
+        fetchUnreadCount(); // Initial fetch
+        const interval = setInterval(fetchUnreadCount, 30000); // Poll every 30 seconds
+        return () => clearInterval(interval);
+    }, [user.id]);
+
+    const handleCallHistoryClick = async () => {
+        if (unreadCount > 0) {
+            await markNotificationsAsRead(user.id!, 'missed_call');
+            setUnreadCount(0); // Immediately update UI
+        }
+    };
 
     useEffect(() => {
         if (isSuccess) {
@@ -77,6 +98,7 @@ const LeftSidebar = () => {
                                             isActive ? 'text-white font-semibold' : 'text-warm-gray hover:text-dark-1'
                                         }`
                                     }
+                                    onClick={link.route === '/call-history' ? handleCallHistoryClick : undefined}
                                 >
                                     <div className="relative">
                                         <img 
@@ -88,6 +110,11 @@ const LeftSidebar = () => {
                                         />
                                     </div>
                                     <span>{link.label}</span>
+                                    {link.route === '/call-history' && unreadCount > 0 && (
+                                        <span className="ml-auto w-5 h-5 text-xs flex items-center justify-center bg-red-500 text-white rounded-full">
+                                            {unreadCount}
+                                        </span>
+                                    )}
                                 </NavLink>
                             </li>
                         );
