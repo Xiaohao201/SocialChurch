@@ -7,23 +7,17 @@ import dotenv from 'dotenv';
 // 加载 .env 文件中的环境变量
 dotenv.config();
 
-// --- 调试代码 ---
-console.log('--- 环境变量诊断 ---');
-console.log('TWILIO_ACCOUNT_SID 是否已加载:', !!process.env.TWILIO_ACCOUNT_SID);
-console.log('TWILIO_AUTH_TOKEN 是否已加载:', !!process.env.TWILIO_AUTH_TOKEN);
-console.log('--- 诊断结束 ---');
-// --- 调试代码结束 ---
-
 const app = express();
 const port = 3001;
 
-// .env 文件中需要有这些变量
+// Twilio 凭证
 const accountSid = process.env.TWILIO_ACCOUNT_SID;
 const authToken = process.env.TWILIO_AUTH_TOKEN;
 
+// 检查凭证是否存在
 if (!accountSid || !authToken) {
-  console.error("错误：TWILIO_ACCOUNT_SID 和 TWILIO_AUTH_TOKEN 必须在 .env 文件中设置。");
-  process.exit(1);
+  console.error('错误：未在 .env 文件中配置 TWILIO_ACCOUNT_SID 和/或 TWILIO_AUTH_TOKEN');
+  process.exit(1); // 退出进程
 }
 
 const client = twilio(accountSid, authToken);
