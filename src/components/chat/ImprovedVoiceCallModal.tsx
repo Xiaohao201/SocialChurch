@@ -42,11 +42,12 @@ const fetchTurnCredentials = async () => {
     if (!response.ok) {
       throw new Error('Network response was not ok');
     }
-    const turnServers = await response.json();
-    return turnServers;
+    const data = await response.json();
+    // 直接返回 iceServers 数组
+    return data.iceServers || [];
   } catch (error) {
     console.error('Failed to fetch TURN credentials:', error);
-    return []; // Return empty array on failure
+    return []; // 失败时返回空数组
   }
 };
 
