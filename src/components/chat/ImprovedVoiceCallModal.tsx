@@ -5,6 +5,21 @@ import { ImprovedVoiceCallService, CallStatus, defaultImprovedVoiceCallConfig } 
 import { useUserContext } from '@/context/AuthContext';
 import { getUserAvatarUrl } from '@/lib/appwrite/api';
 
+// Function to fetch TURN credentials from your backend
+const fetchTurnCredentials = async () => {
+  try {
+    const response = await fetch('http://localhost:3001/api/get-turn-credentials');
+    if (!response.ok) {
+      throw new Error('Network response was not ok');
+    }
+    const turnServers = await response.json();
+    return turnServers;
+  } catch (error) {
+    console.error('Failed to fetch TURN credentials:', error);
+    return []; // Return empty array on failure
+  }
+};
+
 interface ImprovedVoiceCallModalProps {
   isOpen: boolean;
   onClose: () => void;
@@ -42,32 +57,20 @@ const ImprovedVoiceCallModal: React.FC<ImprovedVoiceCallModalProps> = ({
     const initializeService = async () => {
       if (isOpen && user?.$id && !voiceServiceRef.current) {
         try {
-          console.log('🚀 初始化改进的语音通话服务');
+          console.log('🚀 Initializing voice call service...');
+          console.log('📡 Fetching TURN credentials...');
+          const turnServers = await fetchTurnCredentials();
 
-          const customConfig = {
+          const iceConfig = {
             iceServers: [
-              // Public STUN servers - for address discovery
               { urls: 'stun:stun.l.google.com:19302' },
               { urls: 'stun:stun1.l.google.com:19302' },
-              { urls: 'stun:stun2.l.google.com:19302' },
-              { urls: 'stun:stun3.l.google.com:19302' },
-              { urls: 'stun:stun4.l.google.com:19302' },
-              { urls: 'stun:stun.services.mozilla.com' },
-
-              // A TURN server is needed for the most restrictive networks.
-              // Replace the following with your actual TURN server credentials.
-              // You can get TURN credentials from services like Twilio, Xirsys, etc.
-              /*
-              {
-                urls: 'turn:YOUR_TURN_SERVER_URL:3478',
-                username: 'YOUR_TURN_USERNAME',
-                credential: 'YOUR_TURN_PASSWORD',
-              },
-              */
+              ...turnServers, // Add the TURN servers from Twilio
             ],
           };
-
-          voiceServiceRef.current = new ImprovedVoiceCallService(customConfig);
+          
+          console.log('🎙️ Using ICE Configuration:', iceConfig);
+          voiceServiceRef.current = new ImprovedVoiceCallService(iceConfig);
           
           // 设置回调函数
           voiceServiceRef.current.setCallbacks({
