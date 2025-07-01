@@ -1,8 +1,8 @@
 import React from 'react';
-import { ImageIcon, FolderOpen, MapPin } from 'lucide-react';
+import { ImageIcon, FolderOpen } from 'lucide-react';
 import { cn } from '@/lib/utils';
 
-export type AttachmentType = 'media' | 'file' | 'location';
+export type AttachmentType = 'media' | 'file';
 
 interface AttachmentMenuProps {
   open: boolean;
@@ -13,7 +13,6 @@ interface AttachmentMenuProps {
 const menuItems: { type: AttachmentType; label: string; icon: React.ElementType }[] = [
   { type: 'media', label: '照片/视频', icon: ImageIcon },
   { type: 'file', label: '文件', icon: FolderOpen },
-  { type: 'location', label: '位置', icon: MapPin },
 ];
 
 const AttachmentMenu: React.FC<AttachmentMenuProps> = ({ open, onSelect, className }) => {

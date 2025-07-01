@@ -112,7 +112,6 @@ const App = () => {
           incomingOffer={incomingCall.offer}
         />
       )}
-
       <Toaster />
     </main>
   )

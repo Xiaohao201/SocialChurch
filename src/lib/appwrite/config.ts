@@ -1,4 +1,4 @@
-import { Client, Account, Databases, Storage, Avatars } from 'appwrite'
+import { Client, Account, Databases, Storage, Functions, Locale, Avatars } from 'appwrite'
 
 export const appwriteConfig = {
   url: import.meta.env.VITE_APPWRITE_URL,
@@ -46,7 +46,10 @@ if (import.meta.env.DEV) {
 }
 
 // 创建和配置 Appwrite 客户端
-const client = new Client();
+const client = new Client()
+  .setEndpoint('https://fra.cloud.appwrite.io/v1')
+  .setProject('6846b9f900368f67ddb4')
+  .setLocale('en-US');
 
 // 基本配置
 client
@@ -61,6 +64,8 @@ client
 export const account = new Account(client);
 export const databases = new Databases(client);
 export const storage = new Storage(client);
+export const functions = new Functions(client);
+export const locale = new Locale(client);
 export const avatars = new Avatars(client);
 
 // 导出配置的客户端

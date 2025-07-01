@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useRef, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState, useCallback } from 'react';
 import { useUserContext } from '@/context/AuthContext';
 import SearchBar from '@/components/chat/SearchBar';
 import MessageList, { MessageThread } from '@/components/chat/MessageList';
@@ -17,6 +17,58 @@ import { client, appwriteConfig } from '@/lib/appwrite/config';
 import useDebounce from "@/hooks/useDebounce";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
+import FileAggregation from '@/components/shared/FileAggregation';
+import { downloadMultipleFiles } from '@/utils/downloadUtils';
+import AudioPlayer from '@/components/shared/AudioPlayer';
+
+// Helper functions for message display
+const formatMessageDate = (timestamp: string | Date) => {
+  const date = typeof timestamp === 'string' ? new Date(timestamp) : timestamp;
+  const now = new Date();
+  const diff = now.getTime() - date.getTime();
+  const isToday = date.toDateString() === now.toDateString();
+  
+  // Format based on how old the message is
+  if (diff < 60 * 1000) { // Less than a minute
+    return 'Just now';
+  } else if (diff < 60 * 60 * 1000) { // Less than an hour
+    const minutes = Math.floor(diff / (60 * 1000));
+    return `${minutes}m ago`;
+  } else if (isToday) { // Today
+    return date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+  } else if (diff < 7 * 24 * 60 * 60 * 1000) { // Within a week
+    const options: Intl.DateTimeFormatOptions = { weekday: 'short', hour: '2-digit', minute: '2-digit' };
+    return date.toLocaleString([], options);
+  } else { // Older than a week
+    const options: Intl.DateTimeFormatOptions = { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' };
+    return date.toLocaleString([], options);
+  }
+};
+
+// Check if message contains a URL
+const containsUrl = (text: string) => {
+  const urlRegex = /(https?:\/\/[^\s]+)/g;
+  return urlRegex.test(text);
+};
+
+// Check if message is just emojis
+const isEmojiOnly = (text: string) => {
+  const emojiRegex = /^[\p{Emoji}\s]+$/u;
+  return emojiRegex.test(text);
+};
+
+const isAudioFile = (fileName: string) => {
+  return /\.(mp3|wav|m4a|ogg|flac|aac)$/i.test(fileName);
+};
+
+// Format file size helper
+const formatFileSize = (bytes: number) => {
+  if (bytes === 0) return '0 B';
+  const k = 1024;
+  const sizes = ['B', 'KB', 'MB', 'GB'];
+  const i = Math.floor(Math.log(bytes) / Math.log(k));
+  return parseFloat((bytes / Math.pow(k, i)).toFixed(1)) + ' ' + sizes[i];
+};
 
 const ModernChat: React.FC = () => {
   const { user } = useUserContext();
@@ -244,24 +296,10 @@ const ModernChat: React.FC = () => {
 
   // 附件点击
   const handleAttach = (type: AttachmentType) => {
-    if (type === 'location') {
-      if (!navigator.geolocation) {
-        toast({ title: '定位失败', description: '浏览器不支持地理定位', variant: 'destructive' });
-        return;
-      }
-      navigator.geolocation.getCurrentPosition(
-        (pos) => {
-          const { latitude, longitude } = pos.coords;
-          handleSend(`[位置] https://maps.google.com/?q=${latitude},${longitude}`);
-        },
-        () => toast({ title: '定位失败', description: '无法获取位置', variant: 'destructive' })
-      );
-    } else {
-      // trigger hidden file input
-      if (fileInputRef.current) {
-        fileInputRef.current.accept = type === 'media' ? 'image/*,video/*' : '*/*';
-        fileInputRef.current.click();
-      }
+    // trigger hidden file input
+    if (fileInputRef.current) {
+      fileInputRef.current.accept = type === 'media' ? 'image/*,video/*' : '*/*';
+      fileInputRef.current.click();
     }
   };
 
@@ -349,6 +387,150 @@ const ModernChat: React.FC = () => {
     }
   };
 
+  // Group consecutive files from the same sender
+  const groupConsecutiveFiles = useCallback((messages: any[]) => {
+    const grouped: any[] = [];
+    let currentGroup: any[] = [];
+    
+    messages.forEach((msg, index) => {
+      const prevMsg = index > 0 ? messages[index - 1] : null;
+      const nextMsg = index < messages.length - 1 ? messages[index + 1] : null;
+      
+      // Check if this message should be grouped with previous
+      const shouldGroupWithPrev = prevMsg && 
+        prevMsg.senderId === msg.senderId &&
+        prevMsg.type === 'file' && 
+        msg.type === 'file' &&
+        (new Date(msg.timestamp).getTime() - new Date(prevMsg.timestamp).getTime()) < 30000; // 30 seconds
+      
+      // Check if this message should be grouped with next
+      const shouldGroupWithNext = nextMsg &&
+        nextMsg.senderId === msg.senderId &&
+        nextMsg.type === 'file' && 
+        msg.type === 'file' &&
+        (new Date(nextMsg.timestamp).getTime() - new Date(msg.timestamp).getTime()) < 30000; // 30 seconds
+
+      if (msg.type === 'file' && (shouldGroupWithPrev || shouldGroupWithNext)) {
+        currentGroup.push(msg);
+        
+        // If this is the last message in a group, finalize it
+        if (!shouldGroupWithNext) {
+          if (currentGroup.length > 1) {
+            // Create aggregated message
+            const aggregated = {
+              ...currentGroup[0],
+              id: `aggregated-${currentGroup[0].$id}`,
+              type: 'file-aggregation',
+              files: currentGroup.map(m => ({
+                id: m.$id || m.id,
+                name: m.content,
+                size: (m.fileData || m.file_data || m.fileMeta)?.size || 0,
+                type: (m.fileData || m.file_data || m.fileMeta)?.type || 'application/octet-stream',
+                url: (m.fileData || m.file_data || m.fileMeta)?.url,
+                file: (m.fileData || m.file_data || m.fileMeta)?.file,
+                base64: (m.fileData || m.file_data || m.fileMeta)?.base64,
+              })),
+              timestamp: currentGroup[currentGroup.length - 1].timestamp,
+              isFirstInGroup: index === 0 || messages[index - currentGroup.length]?.senderId !== msg.senderId,
+              isLastInGroup: index === messages.length - 1 || nextMsg?.senderId !== msg.senderId,
+            };
+            grouped.push(aggregated);
+          } else {
+            // Single file, add normally
+            grouped.push({
+              ...currentGroup[0],
+              isFirstInGroup: !shouldGroupWithPrev,
+              isLastInGroup: !shouldGroupWithNext,
+            });
+          }
+          currentGroup = [];
+        }
+      } else {
+        // Non-file message or isolated file
+        if (currentGroup.length > 0) {
+          // Finalize any pending group
+          if (currentGroup.length > 1) {
+            const aggregated = {
+              ...currentGroup[0],
+              id: `aggregated-${currentGroup[0].$id}`,
+              type: 'file-aggregation',
+              files: currentGroup.map(m => ({
+                id: m.$id || m.id,
+                name: m.content,
+                size: (m.fileData || m.file_data || m.fileMeta)?.size || 0,
+                type: (m.fileData || m.file_data || m.fileMeta)?.type || 'application/octet-stream',
+                url: (m.fileData || m.file_data || m.fileMeta)?.url,
+                file: (m.fileData || m.file_data || m.fileMeta)?.file,
+                base64: (m.fileData || m.file_data || m.fileMeta)?.base64,
+              })),
+              timestamp: currentGroup[currentGroup.length - 1].timestamp,
+            };
+            grouped.push(aggregated);
+          } else {
+            grouped.push(currentGroup[0]);
+          }
+          currentGroup = [];
+        }
+        
+        // Add message properties for grouping
+        const prevGrouped = grouped[grouped.length - 1];
+        const isFirstInGroup = !prevGrouped || prevGrouped.senderId !== msg.senderId;
+        const isLastInGroup = !nextMsg || nextMsg.senderId !== msg.senderId;
+        
+        grouped.push({
+          ...msg,
+          isFirstInGroup,
+          isLastInGroup,
+        });
+      }
+    });
+    
+    return grouped;
+  }, []);
+
+  // Process messages for better UI grouping and file aggregation
+  const processedMessages = useMemo(() => {
+    if (!messages.length) return [];
+    
+    // Sort messages by timestamp
+    const sorted = [...messages].sort((a, b) => 
+      new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime()
+    );
+
+    // Group consecutive files
+    const grouped = groupConsecutiveFiles(sorted);
+
+    // Add UI display properties
+    return grouped.map((msg, index) => {
+      const prevMsg = index > 0 ? grouped[index - 1] : null;
+      const nextMsg = index < grouped.length - 1 ? grouped[index + 1] : null;
+      
+      // Calculate time gap
+      const timeGap = prevMsg 
+        ? (new Date(msg.timestamp).getTime() - new Date(prevMsg.timestamp).getTime()) > 5 * 60 * 1000 // 5 min gap
+        : true;
+      
+      // Determine message content type (for special rendering)
+      let contentType = 'text';
+      if (msg.type === 'file') {
+        contentType = 'file';
+      } else if (msg.type === 'file-aggregation') {
+        contentType = 'file-aggregation';
+      } else if (isEmojiOnly(msg.content)) {
+        contentType = 'emoji';
+      } else if (containsUrl(msg.content)) {
+        contentType = 'url';
+      }
+      
+      return {
+        ...msg,
+        showTimeGroup: timeGap,
+        formattedTime: formatMessageDate(msg.timestamp),
+        contentType
+      };
+    });
+  }, [messages, groupConsecutiveFiles]);
+
   return (
     <div className="flex h-full w-full text-dark-1">
       {/* Left column */}
@@ -416,49 +598,154 @@ const ModernChat: React.FC = () => {
             />
 
             {/* Messages */}
-            <div className="flex-1 overflow-y-auto p-6 space-y-4">
+            <div className="flex-1 overflow-y-auto p-6">
               {loadingMessages ? (
                 <div className="flex h-full items-center justify-center">
                   <Loader />
                 </div>
-              ) : messages.length === 0 ? (
+              ) : processedMessages.length === 0 ? (
                 <div className="flex h-full items-center justify-center text-muted-foreground">
                   还没有消息，开始聊天吧！
                 </div>
               ) : (
-                messages.map((msg) => {
-                  if (msg.type === 'file') {
-                    const fd = msg.fileData || msg.file_data || msg.fileMeta;
-                    const fileData = typeof fd === 'string' ? JSON.parse(fd) : fd;
-                    return (
-                      <FileMessage
-                        key={msg.$id || msg.id}
-                        fileData={fileData}
-                        isMyMessage={msg.senderId === user.$id}
-                        onContextMenu={(e) => handleContextMenu(e, msg)}
-                      />
+                <div className="space-y-1">
+                  {processedMessages.map((msg, index) => {
+                    // Show date separator if needed
+                    const showDateSeparator = msg.showTimeGroup && (
+                      <div key={`date-${index}`} className="flex justify-center my-4">
+                        <div className="bg-muted/30 rounded-full px-3 py-1 text-xs text-muted-foreground">
+                          {formatMessageDate(msg.timestamp)}
+                        </div>
+                      </div>
                     );
-                  }
-                  const sender = msg.senderId === user.$id ? user : currentChat.otherUser;
-                  const isSenderOnline = msg.senderId === user.$id ? user.isOnline : isPeerOnline;
-                  return (
-                    <MessageBubble
-                      key={msg.$id || msg.id}
-                      message={{
-                        id: msg.$id || msg.id,
-                        content: msg.content,
-                        type: msg.type || 'text',
-                        senderId: msg.senderId,
-                        timestamp: new Date(msg.timestamp),
-                        status: msg.status || 'sent',
-                        avatar: sender?.imageUrl,
-                        isOnline: isSenderOnline,
-                      }}
-                      isMe={msg.senderId === user.$id}
-                      onContextMenu={(e) => handleContextMenu(e, msg)}
-                    />
-                  );
-                })
+                    
+                    // Render file aggregation
+                    if (msg.type === 'file-aggregation') {
+                      return (
+                        <React.Fragment key={msg.id}>
+                          {showDateSeparator}
+                          <FileAggregation
+                            files={msg.files}
+                            isMyMessage={msg.senderId === user.$id}
+                            showAvatar={msg.isLastInGroup}
+                            isFirstInGroup={msg.isFirstInGroup}
+                            isLastInGroup={msg.isLastInGroup}
+                            timestamp={msg.formattedTime}
+                            onDownloadAll={async () => {
+                              try {
+                                const downloadFiles = msg.files.map((file: any) => ({
+                                  url: file.base64 || file.url || '',
+                                  filename: file.name
+                                })).filter((f: any) => f.url);
+
+                                if (downloadFiles.length === 0) {
+                                  toast({
+                                    title: 'Download Failed',
+                                    description: 'No files available for download',
+                                    variant: 'destructive',
+                                  });
+                                  return;
+                                }
+
+                                toast({ 
+                                  title: 'Downloads Started', 
+                                  description: `Downloading ${downloadFiles.length} files...` 
+                                });
+
+                                await downloadMultipleFiles(downloadFiles);
+                                
+                                toast({
+                                  title: 'Downloads Complete',
+                                  description: `Successfully downloaded ${downloadFiles.length} files`,
+                                });
+                              } catch (error) {
+                                console.error('Batch download failed:', error);
+                                toast({
+                                  title: 'Download Failed',
+                                  description: 'Failed to download files, please try again',
+                                  variant: 'destructive',
+                                });
+                              }
+                            }}
+                            onContextMenu={(e: React.MouseEvent) => handleContextMenu(e, msg)}
+                          />
+                        </React.Fragment>
+                      );
+                    }
+                    
+                    // Render single file
+                    if (msg.type === 'file') {
+                      const fd = msg.fileData || msg.file_data || msg.fileMeta;
+                      const fileData = typeof fd === 'string' ? JSON.parse(fd) : fd;
+                      
+                      if (fileData && fileData.url && isAudioFile(fileData.name)) {
+                        return (
+                          <React.Fragment key={msg.$id || msg.id}>
+                            {showDateSeparator}
+                            <div className={`flex ${msg.senderId === user.$id ? 'justify-end' : 'justify-start'} mb-2`}>
+                              <div className={`max-w-[320px] ${msg.senderId === user.$id ? 'ml-auto' : 'mr-auto'}`}>
+                                <AudioPlayer
+                                  audioId={msg.$id || msg.id}
+                                  src={fileData.url}
+                                  fileName={fileData.name}
+                                  fileSize={formatFileSize(fileData.size)}
+                                  isMyMessage={msg.senderId === user.$id}
+                                />
+                                {msg.isLastInGroup && (
+                                  <div className={`text-[10px] mt-1 ${msg.senderId === user.$id ? 'text-right text-gray-500' : 'text-left text-gray-500'}`}>
+                                    {msg.formattedTime}
+                                  </div>
+                                )}
+                              </div>
+                            </div>
+                          </React.Fragment>
+                        );
+                      }
+
+                      return (
+                        <React.Fragment key={msg.$id || msg.id}>
+                          {showDateSeparator}
+                          <FileMessage
+                            fileData={fileData}
+                            isMyMessage={msg.senderId === user.$id}
+                            onContextMenu={(e: React.MouseEvent) => handleContextMenu(e, msg)}
+                            showAvatar={msg.isLastInGroup}
+                            isFirstInGroup={msg.isFirstInGroup}
+                            isLastInGroup={msg.isLastInGroup}
+                            timestamp={msg.formattedTime}
+                          />
+                        </React.Fragment>
+                      );
+                    }
+                    
+                    // Render regular message
+                    const sender = msg.senderId === user.$id ? user : currentChat.otherUser;
+                    const isSenderOnline = msg.senderId === user.$id ? user.isOnline : isPeerOnline;
+                    
+                    return (
+                      <React.Fragment key={msg.$id || msg.id}>
+                        {showDateSeparator}
+                        <MessageBubble
+                          message={{
+                            id: msg.$id || msg.id,
+                            content: msg.content,
+                            type: msg.contentType || 'text',
+                            senderId: msg.senderId,
+                            timestamp: msg.formattedTime,
+                            status: msg.status || 'sent',
+                            avatar: sender?.imageUrl,
+                            isOnline: isSenderOnline,
+                          }}
+                          isMe={msg.senderId === user.$id}
+                          showAvatar={msg.isLastInGroup}
+                          isFirstInGroup={msg.isFirstInGroup}
+                          isLastInGroup={msg.isLastInGroup}
+                          onContextMenu={(e: React.MouseEvent) => handleContextMenu(e, msg)}
+                        />
+                      </React.Fragment>
+                    );
+                  })}
+                </div>
               )}
               {/* dummy div for scroll */}
               <div ref={messagesEndRef} />

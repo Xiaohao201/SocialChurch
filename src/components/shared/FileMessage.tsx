@@ -32,9 +32,22 @@ interface FileMessageProps {
   isMyMessage: boolean;
   onDownload?: (fileData: FileData) => void;
   onContextMenu?: (event: React.MouseEvent) => void;
+  showAvatar?: boolean;
+  isFirstInGroup?: boolean;
+  isLastInGroup?: boolean;
+  timestamp?: string;
 }
 
-const FileMessage: React.FC<FileMessageProps> = ({ fileData, isMyMessage, onDownload, onContextMenu }) => {
+const FileMessage: React.FC<FileMessageProps> = ({ 
+  fileData, 
+  isMyMessage, 
+  onDownload, 
+  onContextMenu,
+  showAvatar,
+  isFirstInGroup,
+  isLastInGroup,
+  timestamp
+}) => {
   const { toast } = useToast();
   const [showPreview, setShowPreview] = useState(false);
   const [isDownloading, setIsDownloading] = useState(false);
@@ -511,24 +524,6 @@ const FileMessage: React.FC<FileMessageProps> = ({ fileData, isMyMessage, onDown
                     </div>
                   </div>
                   
-                  {/* 下载按钮 */}
-                  <Button
-                    variant="ghost"
-                    size="sm"
-                    onClick={(e) => {
-                      e.stopPropagation();
-                      handleDownload();
-                    }}
-                    className="absolute top-3 right-3 w-9 h-9 bg-black/50 hover:bg-black/70 text-white rounded-full p-0 transition-all shadow-md opacity-0 group-hover:opacity-100"
-                    title="下载视频"
-                  >
-                    {isDownloading ? (
-                      <div className="w-4 h-4 border-2 border-white border-t-transparent rounded-full animate-spin" />
-                    ) : (
-                      <Download className="w-4 h-4" />
-                    )}
-                  </Button>
-                  
                   {/* 视频信息栏 */}
                   <div className="absolute bottom-3 left-3 right-3 flex justify-between items-end">
                     {/* 时长信息 */}
@@ -820,15 +815,6 @@ const FileMessage: React.FC<FileMessageProps> = ({ fileData, isMyMessage, onDown
                   <h3 className="font-medium text-sm truncate">{fileData.name}</h3>
                   <p className="text-xs text-white/70">{formatFileSize(fileData.size)}</p>
                 </div>
-                <Button
-                  variant="ghost"
-                  size="sm"
-                  onClick={handleDownload}
-                  className="text-white hover:bg-white/20 h-8 px-3"
-                >
-                  <Download className="w-4 h-4 mr-1" />
-                  下载
-                </Button>
               </div>
             </div>
 
