@@ -788,7 +788,11 @@ const ModernChat: React.FC = () => {
         <VideoCallModal
           isOpen={showVideoCall}
           onClose={() => setShowVideoCall(false)}
-          targetUser={currentChat.otherUser}
+          targetUser={{
+            id: currentChat.otherUser?.$id || '',
+            name: currentChat.otherUser?.name || '',
+            avatar: currentChat.otherUser?.imageUrl,
+          }}
           mode="outgoing"
         />
       )}
