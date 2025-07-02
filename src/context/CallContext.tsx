@@ -150,8 +150,22 @@ export const CallProvider: React.FC<{ children: ReactNode }> = ({ children }) =>
       const result = JSON.parse(execution.responseBody);
       const token = result.token;
 
-      // 2. 获取本地音视频轨道
-      const stream = await navigator.mediaDevices.getUserMedia({ video: true, audio: true });
+      // 2. 获取本地音视频轨道，并增加详细错误处理
+      let stream: MediaStream;
+      try {
+        stream = await navigator.mediaDevices.getUserMedia({ video: true, audio: true });
+      } catch (err: any) {
+          console.error('getUserMedia error: ', err.name, err.message);
+          let userMessage = 'Failed to access camera and microphone.';
+          if (err.name === 'NotAllowedError') {
+              userMessage = 'Permission to use camera and microphone was denied. Please allow access in your browser settings.';
+          } else if (err.name === 'NotFoundError') {
+              userMessage = 'No camera or microphone found. Please ensure your devices are connected and enabled.';
+          }
+          setError(new Error(userMessage));
+          throw new Error(userMessage); // 重新抛出错误，以停止后续流程
+      }
+      
       const tracks = [
           new LocalVideoTrack(stream.getVideoTracks()[0]),
           new LocalAudioTrack(stream.getAudioTracks()[0])
