@@ -1,44 +1,43 @@
-import { useState, useEffect } from 'react';
+import React, { useEffect, useState } from 'react';
 import { useUserContext } from '@/context/AuthContext';
-import { getCallHistoryForUser } from '@/lib/appwrite/api';
-import { Models } from 'appwrite';
+import { databases as db } from '@/lib/appwrite/config';
+import { appwriteConfig } from '@/lib/appwrite/config';
+import { Query } from 'appwrite';
+import { CallDocument } from '@/context/CallContext';
 import Loader from '@/components/shared/Loader';
 import { Phone, PhoneMissed, PhoneOutgoing, PhoneIncoming } from 'lucide-react';
 
-// 定义通话记录的TypeScript接口
-interface ICallHistoryDocument extends Models.Document {
-  callerId: string;
-  receiverId: string;
-  callerName: string;
-  receiverName: string;
-  callerAvatar?: string;
-  receiverAvatar?: string;
-  status: 'completed' | 'missed' | 'rejected';
-  duration?: number;
-  initiatedAt: string;
-}
-
 const CallHistory = () => {
   const { user } = useUserContext();
-  const [callHistory, setCallHistory] = useState<ICallHistoryDocument[]>([]);
-  const [isLoading, setIsLoading] = useState(true);
+  const [calls, setCalls] = useState<(CallDocument & { $createdAt: string })[]>([]);
+  const [loading, setLoading] = useState(true);
 
   useEffect(() => {
+    if (!user.$id) return;
+
     const fetchCallHistory = async () => {
-      if (!user.id) return;
-      setIsLoading(true);
       try {
-        const history = await getCallHistoryForUser(user.id);
-        setCallHistory(history as ICallHistoryDocument[]);
+        const response = await db.listDocuments(
+          appwriteConfig.databaseId,
+          appwriteConfig.callsCollectionId,
+          [
+            Query.or([
+              Query.equal('callerId', user.$id),
+              Query.equal('receiverId', user.$id)
+            ]),
+            Query.orderDesc('$createdAt')
+          ]
+        );
+        setCalls(response.documents as unknown as (CallDocument & { $createdAt: string })[]);
       } catch (error) {
-        console.error("无法获取通话记录:", error);
+        console.error("Failed to fetch call history:", error);
       } finally {
-        setIsLoading(false);
+        setLoading(false);
       }
     };
 
     fetchCallHistory();
-  }, [user.id]);
+  }, [user.$id]);
 
   const formatCallDuration = (seconds: number) => {
     if (seconds < 60) return `${seconds}秒`;
@@ -47,78 +46,56 @@ const CallHistory = () => {
     return `${minutes}分${remainingSeconds > 0 ? ` ${remainingSeconds}秒` : ''}`;
   };
   
-  const renderCallStatusIcon = (call: ICallHistoryDocument) => {
-    const isOutgoing = call.callerId === user.id;
+  const renderCallStatusIcon = (call: CallDocument) => {
+    const isOutgoing = call.callerId === user.$id;
     
     switch(call.status) {
-      case 'completed':
-        return isOutgoing ? 
-          <PhoneOutgoing className="text-green-500" /> : 
-          <PhoneIncoming className="text-green-500" />;
-      case 'missed':
-        return isOutgoing ? 
-          <PhoneOutgoing className="text-red-500" /> : // 你呼叫但对方未接
-          <PhoneMissed className="text-red-500" />;    // 对方呼叫但你未接
+      case 'answered':
+        return isOutgoing ? <PhoneOutgoing className="w-4 h-4 text-green-500" /> : <PhoneIncoming className="w-4 h-4 text-green-500" />;
       case 'rejected':
-         return isOutgoing ?
-          <PhoneOutgoing className="text-red-500" /> : // 你呼叫但对方拒绝
-          <PhoneMissed className="text-red-500" />;    // 对方呼叫但你拒绝
+      case 'missed':
+      case 'canceled':
+      case 'busy':
+        return <PhoneMissed className="w-4 h-4 text-red-500" />;
       default:
-        return <Phone className="text-gray-500" />;
+        return <Phone className="w-4 h-4 text-gray-500" />;
     }
   };
 
+  if (loading) {
+    return <div className="flex-center w-full h-full"><Loader /></div>;
+  }
+
   return (
-    <div className="flex flex-1">
-      <div className="home-container">
-        <div className="max-w-5xl flex-start gap-3 justify-start w-full">
-          <h2 className="h3-bold md:h2-bold text-left w-full">通话记录</h2>
-        </div>
-
-        {isLoading ? (
-          <Loader />
-        ) : callHistory.length === 0 ? (
-          <p className="text-light-4 mt-10 text-center w-full">暂无通话记录</p>
-        ) : (
-          <ul className="flex flex-col flex-1 gap-9 w-full mt-6">
-            {callHistory.map((call) => {
-              const isOutgoing = call.callerId === user.id;
-              const otherUser = {
-                name: isOutgoing ? call.receiverName : call.callerName,
-                avatar: isOutgoing ? call.receiverAvatar : call.callerAvatar,
-              };
-
-              return (
-                <li key={call.$id} className="flex justify-between items-center w-full">
+    <div className="common-container">
+      <div className="max-w-5xl w-full">
+        <h2 className="h3-bold md:h2-bold text-left w-full">Call History</h2>
+        <div className="mt-8">
+          {calls.length === 0 ? (
+            <p className="text-light-4">No call history found.</p>
+          ) : (
+            <ul className="divide-y divide-gray-700">
+              {calls.map(call => (
+                <li key={call.$id} className="py-4 flex items-center justify-between">
                   <div className="flex items-center gap-4">
-                    <img
-                      src={otherUser.avatar || '/assets/icons/profile-placeholder.svg'}
-                      alt="avatar"
-                      className="h-14 w-14 rounded-full"
-                    />
-                    <div className="flex flex-col">
-                      <p className="base-medium lg:body-bold text-light-1">
-                        {otherUser.name}
-                      </p>
-                      <div className="flex items-center gap-2 text-light-3">
-                        {renderCallStatusIcon(call)}
-                        <p className="subtle-semibold lg:small-regular">
-                           {new Date(call.initiatedAt).toLocaleString()}
+                     {renderCallStatusIcon(call)}
+                     <div>
+                        <p className="font-semibold">
+                          {call.callerId === user.$id ? call.receiverName : call.callerName}
                         </p>
+                        <p className="text-sm text-gray-400 capitalize">{call.status} - {new Date(call.$createdAt).toLocaleString()}</p>
                       </div>
-                    </div>
                   </div>
-                  
-                  {call.status === 'completed' && call.duration !== undefined && (
-                     <p className="small-medium text-light-3">
-                       {formatCallDuration(call.duration)}
-                     </p>
-                  )}
+                  <span className={`px-2 py-1 text-xs rounded-full capitalize ${
+                    call.type === 'video' ? 'bg-blue-500/20 text-blue-300' : 'bg-purple-500/20 text-purple-300'
+                  }`}>
+                    {call.type}
+                  </span>
                 </li>
-              );
-            })}
-          </ul>
-        )}
+              ))}
+            </ul>
+          )}
+        </div>
       </div>
     </div>
   );

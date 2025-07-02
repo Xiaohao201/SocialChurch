@@ -20,6 +20,7 @@ import { Input } from "@/components/ui/input";
 import FileAggregation from '@/components/shared/FileAggregation';
 import { downloadMultipleFiles } from '@/utils/downloadUtils';
 import AudioPlayer from '@/components/shared/AudioPlayer';
+import { useCall } from '@/context/CallContext';
 
 // Helper functions for message display
 const formatMessageDate = (timestamp: string | Date) => {
@@ -73,6 +74,7 @@ const formatFileSize = (bytes: number) => {
 const ModernChat: React.FC = () => {
   const { user } = useUserContext();
   const { toast } = useToast();
+  const { initiateCall } = useCall();
 
   const [search, setSearch] = useState('');
   const debouncedSearch = useDebounce(search, 500);
@@ -593,7 +595,11 @@ const ModernChat: React.FC = () => {
               avatar={currentChat.otherUser?.imageUrl}
               name={currentChat.otherUser?.name || '聊天'}
               onVoiceCall={() => setShowAudioCall(true)}
-              onVideoCall={() => setShowVideoCall(true)}
+              onVideoCall={() => {
+                if (currentChat?.otherUser) {
+                  initiateCall(currentChat.otherUser.$id, currentChat.otherUser.name, currentChat.otherUser.imageUrl);
+                }
+              }}
               onInfo={() => setShowUserProfile(true)}
             />
 

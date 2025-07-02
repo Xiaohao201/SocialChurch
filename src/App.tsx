@@ -1,5 +1,8 @@
 import { Routes, Route, Navigate } from 'react-router-dom'
-import { Profile, UpdateProfile, CallHistory, Home } from './_root/pages'
+import Home from './_root/pages/ModernChat'
+import Profile from './_root/pages/Profile'
+import UpdateProfile from './_root/pages/UpdateProfile'
+import CallHistory from './_root/pages/CallHistory'
 import './globals.css'
 import SigninForm from './_auth/forms/SigninForm'
 import AuthLayout from './_auth/AuthLayout'
@@ -13,6 +16,7 @@ import { useUserContext } from './context/AuthContext'
 import { appwriteSignalingService } from './lib/webrtc/appwriteSignaling'
 import { BaseSignalMessage } from './lib/webrtc/signalingTypes'
 import ImprovedVoiceCallModal from './components/chat/ImprovedVoiceCallModal'
+import VideoCallManager from './components/video/VideoCallManager'
 
 
 const App = () => {
@@ -113,6 +117,7 @@ const App = () => {
         />
       )}
       <Toaster />
+      <VideoCallManager />
     </main>
   )
 }
