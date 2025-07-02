@@ -162,6 +162,11 @@ export const CallProvider: React.FC<{ children: ReactNode }> = ({ children }) =>
           } else if (err.name === 'NotFoundError') {
               userMessage = 'No camera or microphone found. Please ensure your devices are connected and enabled.';
           }
+          toast({
+            title: "Media Device Error",
+            description: userMessage,
+            variant: "destructive",
+          });
           setError(new Error(userMessage));
           throw new Error(userMessage); // 重新抛出错误，以停止后续流程
       }
