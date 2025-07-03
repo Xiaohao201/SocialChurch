@@ -8,17 +8,23 @@ import Draggable from 'react-draggable';
 // 子组件：渲染单个参与者的视频
 const Participant = ({ participant }: { participant: RemoteParticipant }) => {
   const [videoTrack, setVideoTrack] = useState<RemoteVideoTrack | null>(null);
+  const [audioTrack, setAudioTrack] = useState<any>(null);
   const videoRef = useRef<HTMLVideoElement>(null);
+  const audioRef = useRef<HTMLAudioElement>(null);
 
   useEffect(() => {
     const trackSubscribed = (track: any) => {
       if (track.kind === 'video') {
         setVideoTrack(track);
+      } else if (track.kind === 'audio') {
+        setAudioTrack(track);
       }
     };
     const trackUnsubscribed = (track: any) => {
       if (track.kind === 'video') {
         setVideoTrack(null);
+      } else if (track.kind === 'audio') {
+        setAudioTrack(null);
       }
     };
 
@@ -26,8 +32,11 @@ const Participant = ({ participant }: { participant: RemoteParticipant }) => {
     participant.on('trackUnsubscribed', trackUnsubscribed);
     
     // 初始时检查已有的轨道
-    const videoTrack = Array.from(participant.videoTracks.values())[0]?.track;
-    if(videoTrack) setVideoTrack(videoTrack as RemoteVideoTrack);
+    const initialVideoTrack = Array.from(participant.videoTracks.values())[0]?.track;
+    if(initialVideoTrack) setVideoTrack(initialVideoTrack as RemoteVideoTrack);
+    
+    const initialAudioTrack = Array.from(participant.audioTracks.values())[0]?.track;
+    if(initialAudioTrack) setAudioTrack(initialAudioTrack);
 
     return () => {
       participant.off('trackSubscribed', trackSubscribed);
@@ -43,10 +52,20 @@ const Participant = ({ participant }: { participant: RemoteParticipant }) => {
       videoTrack?.detach();
     };
   }, [videoTrack]);
+  
+  useEffect(() => {
+    if (audioTrack && audioRef.current) {
+      audioTrack.attach(audioRef.current);
+    }
+    return () => {
+      audioTrack?.detach();
+    };
+  }, [audioTrack]);
 
   return (
     <div className="w-full h-full bg-black">
       <video ref={videoRef} autoPlay playsInline className="w-full h-full object-cover" />
+      <audio ref={audioRef} autoPlay playsInline />
     </div>
   );
 };

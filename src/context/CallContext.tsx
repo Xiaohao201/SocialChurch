@@ -143,12 +143,18 @@ export const CallProvider: React.FC<{ children: ReactNode }> = ({ children }) =>
         })
       );
 
+      console.log('Twilio token function execution:', execution); // For debugging
+
       if (execution.status === 'failed') {
+        console.error('Execution failed:', execution);
         throw new Error('Failed to create execution for Twilio token');
       }
 
+      console.log('Raw response body from function:', execution.responseBody);
       const result = JSON.parse(execution.responseBody);
       const token = result.token;
+
+      console.log('Parsed Twilio token:', token); // For debugging
 
       // 2. 获取本地音视频轨道，并增加详细错误处理
       let stream: MediaStream;
