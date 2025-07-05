@@ -6,7 +6,7 @@ export interface MessageThread {
   name: string;
   avatar?: string | null;
   preview?: string | null;
-  unread?: boolean;
+  unread: number;
   selected?: boolean;
   isOnline?: boolean;
   onClick?: () => void;
@@ -45,10 +45,15 @@ const MessageList: React.FC<MessageListProps> = ({ threads, className }) => {
               }`}
             ></div>
           </div>
-          <div className="min-w-0 flex-1 group-hover:text-warm-gold">
-            <p className={cn('truncate text-base', t.unread ? 'font-semibold text-foreground' : 'font-medium text-foreground')}>{t.name}</p>
+          <div className="min-w-0 flex-1 relative">
+            <p className={cn('truncate text-base', t.unread > 0 ? 'font-semibold text-charcoal' : 'font-medium text-charcoal')}>{t.name}</p>
             {t.preview && (
-              <p className="truncate text-sm text-muted-foreground">{t.preview}</p>
+              <p className="truncate text-sm text-warm-gray">{t.preview}</p>
+            )}
+            {t.unread > 0 && (
+              <span className="absolute right-0 top-1/2 -translate-y-1/2 w-5 h-5 text-xs flex items-center justify-center bg-notification-red text-white rounded-full">
+                {t.unread}
+              </span>
             )}
           </div>
         </li>

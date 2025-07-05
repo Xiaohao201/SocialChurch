@@ -86,7 +86,7 @@ const Profile = () => {
 
   const handleStartChat = () => {
     if (profileUser && !isOwnProfile) {
-      navigate(`/home?chat=${profileUser.$id}&name=${encodeURIComponent(profileUser.name)}&avatar=${encodeURIComponent(profileUser.imageUrl || '')}`);
+      navigate(`/home?with=${profileUser.$id}`);
     }
   };
 
@@ -246,7 +246,7 @@ const Profile = () => {
     switch (gender) {
       case 'male': return { text: '弟兄', color: 'text-blue-600', icon: UserIcon };
       case 'female': return { text: '姊妹', color: 'text-pink-600', icon: UserIcon };
-      default: return { text: '肢体', color: 'text-gray-600', icon: UserIcon };
+      default: return { text: '保密', color: 'text-gray-600', icon: UserIcon };
     }
   };
 
@@ -383,7 +383,7 @@ const Profile = () => {
                     onChange={(e) => handleInputChange('gender', e.target.value)}
                     className="bg-transparent focus:outline-none text-warm-gray text-sm font-opensans"
                   >
-                    <option value="unknown">肢体</option>
+                    <option value="unknown">保密</option>
                     <option value="male">弟兄</option>
                     <option value="female">姊妹</option>
                   </select>
@@ -441,7 +441,7 @@ const Profile = () => {
               )}
             </div>
 
-            {/* 属灵生日 */}
+            {/* 坚信日期 */}
             <div className="flex items-center gap-2 bg-white px-4 py-2 rounded-full shadow-sm border border-light-gray profile-tag card-hover">
               <Baby className="w-4 h-4 text-church-blue icon-hover" />
               {editingField === 'dateOfFaith' ? (
@@ -469,7 +469,7 @@ const Profile = () => {
                   onClick={() => handleEditStart('dateOfFaith')}
                 >
                   {profileUser.dateOfFaith ? 
-                    formatFaithDate(profileUser.dateOfFaith).replace('年', '').replace('月', '/').replace('日', '') :
+                    formatFaithDate(profileUser.dateOfFaith).replace('年', '/').replace('月', '/').replace('日', '') :
                     (isOwnProfile ? '设置生日' : '期待分享')
                   }
                 </span>

@@ -37,7 +37,7 @@ interface CallState {
 
 // 定义 Context 提供的方法
 interface CallContextType extends CallState {
-  initiateCall: (receiverId: string, receiverName: string, receiverAvatar?: string) => Promise<void>;
+  initiateCall: (receiverId: string, receiverName: string, type: 'video' | 'audio', receiverAvatar?: string) => Promise<void>;
   answerCall: (callDocument: CallDocument) => Promise<void>;
   rejectCall: (callDocument: CallDocument) => Promise<void>;
   endCall: () => Promise<void>;
@@ -221,7 +221,7 @@ export const CallProvider: React.FC<{ children: ReactNode }> = ({ children }) =>
   };
 
   // 发起通话
-  const initiateCall = async (receiverId: string, receiverName: string, receiverAvatar?: string) => {
+  const initiateCall = async (receiverId: string, receiverName: string, type: 'video' | 'audio', receiverAvatar?: string) => {
     if (!user) return;
     cleanupCall(); // 开始新通话前清理旧的
 
@@ -263,7 +263,7 @@ export const CallProvider: React.FC<{ children: ReactNode }> = ({ children }) =>
         receiverName: receiverName,
         receiverAvatar: receiverAvatar,
         status: 'ringing',
-        type: 'video',
+        type: type,
         channelName: callId, // 使用文档 ID 作为频道名
       };
 

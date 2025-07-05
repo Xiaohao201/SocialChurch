@@ -35,6 +35,7 @@ module.exports = {
         'light-4': '#5C5C7B',
         'cream': '#F8F7F2',
         'warm-gray': '#333333',
+        'charcoal': '#8A8A8A',
         'soft-gray': '#888888',
         'light-gray': '#E5E5E5',
         'warm-gold': '#D4AF37',
@@ -44,6 +45,10 @@ module.exports = {
         'accent-gold': '#D4AF37',
         'chat-receive': '#E8F0FE',
         'chat-send': '#F1F1F1',
+        'surface': '#FAFAF9',
+        'sidebar-gray': '#EAEAEA',
+        'status-green': '#34C759',
+        'notification-red': '#FF3B30',
       },
       screens: {
         'xs': '480px',

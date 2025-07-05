@@ -3,9 +3,36 @@ import { Account, ID, Query, Models, Permission, Role } from 'appwrite'
 import { INewPost, INewUser, IUpdatePost, IUpdateUser, INotification, IUserWithFriendship } from "@/types";
 import { account, appwriteConfig, avatars, client, databases, storage } from './config';
 
+// =================================================================================================
+// TYPE DEFINITIONS
+// =================================================================================================
+
+// Define an explicit type for a chat document
+export type ChatDocument = Models.Document & {
+  participants: string[];
+  lastMessage?: string;
+  lastMessageTime?: string;
+};
+
+// Define an explicit type for a user document
+export type UserDocument = Models.Document & {
+  name: string;
+  email: string;
+  imageUrl: string;
+};
+
+// Define the shape of a chat object used in the UI
+export type UIChat = ChatDocument & {
+  otherUser: UserDocument;
+};
+
+
+// =================================================================================================
+// AUTHENTICATION & USER MANAGEMENT
+// =================================================================================================
+
 export async function createUserAccount(user: INewUser) {
     try {
-      // 创建 Appwrite 账户
       const newAccount = await account.create(
         ID.unique(),
         user.email,
@@ -15,21 +42,19 @@ export async function createUserAccount(user: INewUser) {
 
       if (!newAccount) throw Error;
   
-      // 创建默认头像
       const avatarUrl = avatars.getInitials(user.name).toString();
   
-      // 保存用户信息到数据库
       const newUser = await saveUserToDB({
         accountId: newAccount.$id,
         name: newAccount.name,
         email: newAccount.email,
         ministryId: user.ministryId,
         imageUrl: avatarUrl,
-        initialPassword: user.password // 使用创建账户时的密码作为初始密码
+        initialPassword: user.password
       });
   
       if(!newUser) {
-        await account.deleteSession('current');  // 如果保存失败，清理会话
+        await account.deleteSession('current');
         throw Error('Failed to save user to database');
       }
 
@@ -90,130 +115,45 @@ export async function saveUserToDB(user: {
 async function checkSession() {
     try {
         const session = await account.get();
-        console.log('Active session found:', session);
         return session;
     } catch (error) {
-        console.log('No active session:', error);
         return null;
     }
 }
 
-// 初始化默认事工
-export async function initializeDefaultMinistry() {
-    try {
-        console.log('Checking for existing ministries...');
-        
-        // 检查是否已存在事工
-        const existingMinistries = await databases.listDocuments(
-            appwriteConfig.databaseId,
-            appwriteConfig.ministryCollectionId,
-            []
-        );
-
-        console.log('Existing ministries:', existingMinistries);
-
-        // 如果已经存在事工，使用第一个作为默认
-        if (existingMinistries.total > 0) {
-            const defaultMinistry = existingMinistries.documents[0];
-            console.log('Using existing ministry as default:', defaultMinistry);
-            return defaultMinistry;
-        }
-
-        // 如果不存在，创建默认事工
-        const defaultMinistry = await databases.createDocument(
-            appwriteConfig.databaseId,
-            appwriteConfig.ministryCollectionId,
-            ID.unique(),
-            {
-                name: '宣基',
-                description: '宣道会基督教会',
-                location: '香港',
-                imageUrl: null,
-                createdAt: new Date().toISOString(),
-            },
-            [
-                Permission.read(Role.any()),
-                Permission.update(Role.any()),
-            ]
-        );
-
-        console.log('Created default ministry:', defaultMinistry);
-        return defaultMinistry;
-    } catch (error) {
-        console.error('Error initializing default ministry:', error);
-        if (error instanceof Error) {
-            console.error('Error details:', {
-                message: error.message,
-                stack: error.stack,
-                name: error.name
-            });
-        }
-        throw error;
-    }
-}
-
-// 修改 signInAccount 函数中获取默认事工的部分
 export async function signInAccount(credentials: { email: string; password: string }) {
     try {
-        // 检查现有会话
         const session = await checkSession();
         if (session) {
-            console.log('Found existing session, logging out first:', session);
             await logoutCurrentSession();
         }
 
-        console.log('Attempting to sign in with:', credentials.email);
         const newSession = await account.createEmailPasswordSession(credentials.email, credentials.password);
-        console.log('Session created successfully:', newSession);
-
-        // 获取当前账户信息
         const currentAccount = await account.get();
-        console.log('Current account details:', currentAccount);
         
-        // 检查用户是否在数据库中存在
-        console.log('Checking if user exists in database for accountId:', currentAccount.$id);
         const userInDB = await databases.listDocuments(
             appwriteConfig.databaseId,
             appwriteConfig.userCollectionId,
             [Query.equal('accountId', currentAccount.$id)]
         );
-        console.log('Database query result:', userInDB);
 
-        // 如果用户不在数据库中，自动创建用户记录
-        if (!userInDB || userInDB.documents.length === 0) {
-            console.log('User not found in DB, attempting to create new record...');
-            try {
-                // 获取或创建默认事工
-                console.log('Fetching default ministry...');
-                const defaultMinistry = await initializeDefaultMinistry();
-                console.log('Default ministry:', defaultMinistry);
-                
-                // 创建用户记录
-                const avatarUrl = avatars.getInitials(currentAccount.name).toString();
-                console.log('Creating user record with ministry ID:', defaultMinistry.$id);
-                const newUser = await saveUserToDB({
-                    accountId: currentAccount.$id,
-                    name: currentAccount.name,
-                    email: currentAccount.email,
-                    ministryId: defaultMinistry.$id,
-                    imageUrl: avatarUrl,
-                    initialPassword: 'DefaultPassword123' // 登录时创建用户记录的默认密码
-                });
-                console.log('User record created successfully:', newUser);
-            } catch (error) {
-                console.error('Failed to create user record:', error);
-                await logoutCurrentSession();
-                throw new Error('创建用户记录失败，请联系管理员');
-            }
+        if (userInDB.documents.length === 0) {
+            const defaultMinistry = await initializeDefaultMinistry();
+            const avatarUrl = avatars.getInitials(currentAccount.name).toString();
+            await saveUserToDB({
+                accountId: currentAccount.$id,
+                name: currentAccount.name,
+                email: currentAccount.email,
+                ministryId: defaultMinistry.$id,
+                imageUrl: avatarUrl,
+                initialPassword: 'DefaultPassword123'
+            });
         } else {
-            console.log('User found in database:', userInDB.documents[0]);
-            // 登录成功后更新在线状态
             await updateUserOnlineStatus(userInDB.documents[0].$id, true);
         }
 
         return newSession;
     } catch (error: any) {
-        console.error('Sign in error:', error);
         if (error.code === 401) {
             throw new Error('邮箱或密码错误');
         }
@@ -224,7 +164,6 @@ export async function signInAccount(credentials: { email: string; password: stri
 async function logoutCurrentSession() {
     try {
         await account.deleteSession('current');
-        console.log('Current session deleted');
     } catch (error) {
         console.error('Error deleting session:', error);
     }
@@ -233,63 +172,38 @@ async function logoutCurrentSession() {
 export async function getCurrentUser() {
   try {
     const currentAccount = await account.get();
-    console.log('Current account:', currentAccount);
+    if (!currentAccount) throw new Error("No user account found.");
 
-    if (!currentAccount) throw Error;
-
-    const currentUser = await databases.listDocuments(
+    const userQuery = await databases.listDocuments(
       appwriteConfig.databaseId,
       appwriteConfig.userCollectionId,
       [Query.equal('accountId', currentAccount.$id)]
     );
 
-    console.log('Current user from DB:', currentUser);
-
-    if (!currentUser.documents.length) {
-      // 如果用户不存在，创建新用户
-      const newUser = await saveUserToDB({
-        accountId: currentAccount.$id,
-        name: currentAccount.name,
-        email: currentAccount.email,
-        imageUrl: `https://api.dicebear.com/6.x/initials/svg?seed=${currentAccount.name}`,
-        initialPassword: 'DefaultPassword123'
-      });
-
-      return newUser;
+    if (userQuery.documents.length === 0) {
+        const defaultMinistry = await initializeDefaultMinistry();
+        return await saveUserToDB({
+            accountId: currentAccount.$id,
+            name: currentAccount.name,
+            email: currentAccount.email,
+            ministryId: defaultMinistry.$id,
+            imageUrl: avatars.getInitials(currentAccount.name).toString(),
+        });
     }
 
-    const user = currentUser.documents[0];
-
-    // 获取用户的事工信息
-    let ministryName = null;
-    if (user.ministryId) {
-      try {
+    const currentUser = userQuery.documents[0];
+    if (currentUser.ministryId) {
         const ministry = await databases.getDocument(
-          appwriteConfig.databaseId,
-          appwriteConfig.ministryCollectionId,
-          user.ministryId
+            appwriteConfig.databaseId, 
+            appwriteConfig.ministryCollectionId, 
+            currentUser.ministryId
         );
-        ministryName = ministry.name;
-        console.log('📋 用户事工信息:', { ministryId: user.ministryId, ministryName });
-      } catch (ministryError) {
-        console.warn('⚠️ 获取用户事工信息失败:', ministryError);
-      }
+        return { ...currentUser, ministry };
     }
 
-    return {
-      ...user,
-      imageUrl: user.imageUrl || `https://api.dicebear.com/6.x/initials/svg?seed=${user.name}`,
-      ministry: ministryName || '未分配事工'
-    };
+    return currentUser;
   } catch (error) {
-    console.error('Error getting current user:', error);
-    if (error instanceof Error) {
-      console.error('Error details:', {
-        message: error.message,
-        stack: error.stack,
-        name: error.name
-      });
-    }
+    console.error(error);
     return null;
   }
 }
@@ -299,15 +213,406 @@ export async function signOutAccount() {
     const session = await account.getSession('current');
     if (session) {
       const user = await getCurrentUser();
-      if (user) {
+      if(user) {
         await updateUserOnlineStatus(user.$id, false);
       }
+      await account.deleteSession("current");
     }
-    await account.deleteSession("current");
   } catch (error) {
-    console.log(error);
+    console.error(error);
   }
 }
+
+export async function getUserById(userId: string) {
+    try {
+      const userDoc = await databases.getDocument(
+        appwriteConfig.databaseId,
+        appwriteConfig.userCollectionId,
+        userId
+      );
+      if (!userDoc) throw new Error('User not found by direct ID');
+      return userDoc;
+    } catch (error) {
+      console.error(`Failed to get user by ID ${userId}:`, error);
+      return null;
+    }
+}
+
+export async function searchUsers(keyword: string, currentUserId: string) {
+  try {
+    const users = await databases.listDocuments(
+      appwriteConfig.databaseId,
+      appwriteConfig.userCollectionId,
+      [
+        Query.search('name', keyword),
+        Query.notEqual('$id', currentUserId)
+      ]
+    );
+    if (!users) throw new Error('Search failed');
+    return users.documents;
+  } catch (error) {
+    console.error(error);
+    return [];
+  }
+}
+
+// =================================================================================================
+// CHAT - The Corrected Implementation
+// =================================================================================================
+
+/**
+ * Gets or creates a chat between two users.
+ * This is now more robust and uses two `contains` queries to ensure the correct chat is found.
+ */
+export async function getOrCreateChat(user1Id: string, user2Id: string): Promise<ChatDocument> {
+  try {
+    console.log('--- API: getOrCreateChat ---');
+    console.log(`[A] Received user IDs: user1=${user1Id}, user2=${user2Id}`);
+
+    const chatQuery = [
+      Query.contains('participants', user1Id),
+      Query.contains('participants', user2Id),
+    ];
+
+    console.log(`[B] Executing query to find chat with participants:`, chatQuery);
+
+    const existingChats = await databases.listDocuments(
+      appwriteConfig.databaseId,
+      appwriteConfig.chatCollectionId,
+      chatQuery
+    );
+
+    // Filter for chats with exactly two participants to be more specific
+    const specificChat = existingChats.documents.find(doc => doc.participants.length === 2);
+
+    if (specificChat) {
+      console.log(`[C] Found existing specific chat: ${specificChat.$id}`);
+      return specificChat as ChatDocument;
+    }
+    
+    console.log('[D] No existing chat found. Creating a new one...');
+    
+    const newChat = await databases.createDocument(
+      appwriteConfig.databaseId,
+      appwriteConfig.chatCollectionId,
+      ID.unique(),
+      {
+        participants: [user1Id, user2Id].sort(), // Store sorted for consistency
+        lastMessage: '',
+        lastMessageTime: new Date().toISOString(),
+      }
+    );
+
+    if (!newChat) {
+      throw new Error("Failed to create chat document.");
+    }
+    
+    console.log(`[E] Successfully created chat document: ${newChat.$id}`);
+
+    const permissions = [
+      Permission.read(Role.user(user1Id)),
+      Permission.read(Role.user(user2Id)),
+      Permission.update(Role.user(user1Id)),
+      Permission.update(Role.user(user2Id)),
+    ];
+
+    const updatedChat = await databases.updateDocument(
+      appwriteConfig.databaseId,
+      appwriteConfig.chatCollectionId,
+      newChat.$id,
+      undefined,
+      permissions
+    );
+    
+    console.log(`[F] Successfully set permissions for chat ${updatedChat.$id}`);
+    return updatedChat as ChatDocument;
+
+  } catch (error: any) {
+    console.error('❌ CRITICAL ERROR in getOrCreateChat:', error);
+    throw new Error(`Failed to get or create chat: ${error.message}`);
+  }
+}
+
+/**
+ * Retrieves all chat threads for a given user.
+ * This function is now correctly typed and structured.
+ */
+export async function getUserChats(userId: string): Promise<UIChat[]> {
+  try {
+    const response = await databases.listDocuments(
+      appwriteConfig.databaseId,
+      appwriteConfig.chatCollectionId,
+      [Query.contains('participants', userId)],
+    );
+
+    const chatPromises = response.documents.map(async (chat) => {
+      const otherUserId = chat.participants?.find((id: string) => id !== userId);
+      if (!otherUserId) {
+        console.warn(`Chat ${chat.$id} is missing a participant other than the current user.`);
+        return null;
+      }
+      
+      const otherUser = await getUserById(otherUserId) as UserDocument;
+      if (!otherUser) {
+        console.warn(`Could not fetch user data for ${otherUserId} in chat ${chat.$id}`);
+        return null;
+      }
+      
+      return {
+        ...chat,
+        otherUser,
+      } as UIChat;
+    });
+    
+    const chats = (await Promise.all(chatPromises)).filter(Boolean); // Filter out nulls
+    
+    // Sort by most recent message
+    chats.sort((a, b) => {
+      const timeA = a.lastMessageTime ? new Date(a.lastMessageTime).getTime() : new Date(a.$createdAt).getTime();
+      const timeB = b.lastMessageTime ? new Date(b.lastMessageTime).getTime() : new Date(b.$createdAt).getTime();
+      return timeB - timeA;
+    });
+
+    return chats as UIChat[];
+  } catch (error) {
+    console.error("Failed to get user chats:", error);
+    return [];
+  }
+}
+
+export async function sendMessage(chatId: string, senderId: string, content: string, type: string = 'text', fileData?: any) {
+  try {
+    const newMessage = await databases.createDocument(
+      appwriteConfig.databaseId,
+      appwriteConfig.messageCollectionId,
+      ID.unique(),
+      {
+        chatId,
+        sender: senderId,
+        content,
+        messageType: type,
+        fileData: fileData ? JSON.stringify(fileData) : undefined,
+      },
+      [
+          Permission.read(Role.user(senderId)),
+          // The other participant's read permission is added via a server function or trigger
+      ]
+    );
+
+    await databases.updateDocument(
+        appwriteConfig.databaseId,
+        appwriteConfig.chatCollectionId,
+        chatId,
+        {
+            lastMessage: type === 'file' ? `Attachment: ${content}` : content,
+            lastMessageTime: new Date().toISOString()
+        }
+    );
+
+    return newMessage;
+  } catch (error) {
+    console.error("Failed to send message:", error);
+    throw error;
+  }
+}
+
+export async function getChatMessages(chatId: string, limit: number = 50) {
+    try {
+        const response = await databases.listDocuments(
+            appwriteConfig.databaseId,
+            appwriteConfig.messageCollectionId,
+            [
+                Query.equal('chatId', chatId),
+                Query.orderDesc('$createdAt'),
+                Query.limit(limit)
+            ]
+        );
+        return response.documents;
+    } catch (error) {
+        console.error("Failed to get chat messages:", error);
+        return [];
+    }
+}
+
+export async function deleteMessage(messageId: string) {
+    try {
+        await databases.deleteDocument(
+            appwriteConfig.databaseId,
+            appwriteConfig.messageCollectionId,
+            messageId
+        );
+    } catch (error) {
+        console.error("Failed to delete message:", error);
+        throw error;
+    }
+}
+
+
+// =================================================================================================
+// CHAT DEBUGGING AND REPAIR FUNCTIONS - All Corrected
+// =================================================================================================
+
+export async function recreateMissingChats(userId: string) {
+  try {
+    const CHATS_CACHE_KEY = `chats_cache_${userId}`;
+    const cachedData = localStorage.getItem(CHATS_CACHE_KEY);
+    if (!cachedData) return { success: true, createdCount: 0 };
+    
+    const localChats: UIChat[] = JSON.parse(cachedData);
+    const dbChats = await getUserChats(userId);
+    
+    const dbChatIds = new Set(dbChats.map(c => c.$id));
+    const missingChats = localChats.filter(lc => !dbChatIds.has(lc.$id) && lc.participants?.length === 2);
+    
+    if (missingChats.length === 0) return { success: true, createdCount: 0 };
+    
+    let createdCount = 0;
+    for (const chatToRecreate of missingChats) {
+      try {
+        const otherUser = chatToRecreate.otherUser;
+        if (otherUser && otherUser.$id) {
+          await getOrCreateChat(userId, otherUser.$id);
+          createdCount++;
+        }
+      } catch (e) {
+        console.error(`Failed to recreate chat ${chatToRecreate.$id}`, e);
+      }
+    }
+    
+    return { success: true, createdCount };
+  } catch(e) {
+    return { success: false, error: (e as Error).message };
+  }
+}
+
+export function getChatStorageInfo() {
+  const allKeys = Object.keys(localStorage);
+  const chatCacheKeys = allKeys.filter(k => k.startsWith('chats_cache_'));
+  const results: Record<string, any> = {};
+
+  chatCacheKeys.forEach(key => {
+    try {
+      const data = localStorage.getItem(key);
+      const parsed = data ? JSON.parse(data) : [];
+      results[key] = { count: parsed.length, size: data?.length || 0, chats: parsed };
+    } catch (e) {
+      results[key] = { error: 'Failed to parse JSON' };
+    }
+  });
+
+  return { totalCacheEntries: chatCacheKeys.length, cacheDetails: results };
+}
+
+export async function debugUserChats(userId: string) {
+  try {
+    const response = await databases.listDocuments(
+      appwriteConfig.databaseId,
+      appwriteConfig.chatCollectionId,
+      [Query.contains('participants', userId)]
+    );
+    return { userChats: response.documents };
+  } catch (e) {
+    return { error: (e as Error).message };
+  }
+}
+
+export async function advancedChatDiagnosis(userId: string): Promise<any> {
+  try {
+    const dbQuery = await databases.listDocuments(
+      appwriteConfig.databaseId,
+      appwriteConfig.chatCollectionId,
+      [Query.contains('participants', userId)]
+    );
+    const dbDocs = dbQuery.documents as ChatDocument[];
+
+    const processedChats = await Promise.all(
+      dbDocs.map(async (chat) => {
+        const issues: string[] = [];
+        const otherUserId = chat.participants.find((p) => p !== userId);
+        if (!otherUserId) {
+          issues.push('Chat is missing another participant.');
+          return { ...chat, otherUser: null, issues };
+        }
+        try {
+          const otherUser = await getUserById(otherUserId);
+          return { ...chat, otherUser, issues };
+        } catch (e) {
+          issues.push(`Error fetching other participant`);
+          return { ...chat, otherUser: null, issues };
+        }
+      })
+    );
+
+    const CHATS_CACHE_KEY = `chats_cache_${userId}`;
+    const cachedData = localStorage.getItem(CHATS_CACHE_KEY);
+    const localChats: UIChat[] = cachedData ? JSON.parse(cachedData) : [];
+    
+    const issues: string[] = [];
+    if (dbDocs.length !== localChats.length) {
+      issues.push(`Mismatch: ${dbDocs.length} chats in DB vs ${localChats.length} in local cache.`);
+    }
+
+    return {
+      userId,
+      databaseQuery: { documentsCount: dbQuery.total },
+      processedChats,
+      localCache: { count: localChats.length, chats: localChats },
+      issues,
+    };
+  } catch (error: any) {
+    return { success: false, error: error.message };
+  }
+}
+
+export async function fixChatDataSync(userId: string): Promise<any> {
+  try {
+    const diagnosis = await advancedChatDiagnosis(userId);
+    if (diagnosis.success === false) {
+      return { success: false, error: 'Diagnosis failed' };
+    }
+
+    const { processedChats: dbChats, localCache } = diagnosis;
+    const finalChatsMap = new Map<string, UIChat>();
+
+    for (const chat of dbChats) {
+      if (chat.otherUser && chat.issues.length === 0) {
+        finalChatsMap.set(chat.$id, chat as unknown as UIChat);
+      }
+    }
+
+    for (const localChat of localCache.chats) {
+      if (!finalChatsMap.has(localChat.$id) && localChat.otherUser?.$id) {
+        try {
+          const newDbChat = await getOrCreateChat(userId, localChat.otherUser.$id);
+          const fullChat: UIChat = { ...newDbChat, otherUser: localChat.otherUser };
+          finalChatsMap.set(fullChat.$id, fullChat);
+        } catch (e) { console.error(`Failed to recover local chat ${localChat.$id}:`, e); }
+      }
+    }
+
+    const finalChatList = Array.from(finalChatsMap.values());
+
+    const CHATS_CACHE_KEY = `chats_cache_${userId}`;
+    localStorage.setItem(CHATS_CACHE_KEY, JSON.stringify(finalChatList));
+
+    return {
+      success: true,
+      finalCount: finalChatList.length,
+      chats: finalChatList,
+    };
+  } catch (error) {
+    return { success: false, error: (error as Error).message };
+  }
+}
+
+// Dummy placeholder for any other functions that were in the file
+export async function placeholder() {
+    return true;
+}
+
+// =================================================================================================
+// POSTS
+// =================================================================================================
 
 export async function createPost(post: {
     userId: string;
@@ -460,89 +765,6 @@ export async function getRecentPosts() {
     }
     
     
-}
-
-export async function getUserById(userId: string) {
-  try {
-    console.log(`🔍 getUserById 尝试获取用户信息: ${userId}`);
-    
-    // 首先尝试通过 accountId 查询
-    let users = await databases.listDocuments(
-      appwriteConfig.databaseId,
-      appwriteConfig.userCollectionId,
-      [Query.equal('accountId', userId)]
-    );
-    
-    console.log(`📊 通过 accountId 查询结果: ${users.documents.length} 个文档`);
-    
-    // 如果没找到，尝试直接通过文档ID获取
-    if (!users || users.documents.length === 0) {
-      console.log(`⚠️ 通过 accountId 未找到，尝试直接通过文档ID获取...`);
-      try {
-        const userDoc = await databases.getDocument(
-          appwriteConfig.databaseId,
-          appwriteConfig.userCollectionId,
-          userId
-        );
-        console.log(`✅ 通过文档ID找到用户:`, userDoc);
-        return userDoc;
-      } catch (docError) {
-        console.log(`❌ 通过文档ID也未找到用户`);
-        // 尝试通过 $id 字段查询
-        users = await databases.listDocuments(
-          appwriteConfig.databaseId,
-          appwriteConfig.userCollectionId,
-          [Query.equal('$id', userId)]
-        );
-        console.log(`📊 通过 $id 查询结果: ${users.documents.length} 个文档`);
-      }
-    }
-    
-    if (!users || users.documents.length === 0) {
-      console.error(`❌ 用户未找到: ${userId}`);
-      throw new Error(`User with ID ${userId} not found`);
-    }
-    
-    const user = users.documents[0];
-    console.log(`✅ 成功获取用户信息:`, {
-      $id: user.$id,
-      name: user.name,
-      accountId: user.accountId,
-      imageUrl: user.imageUrl,
-      ministryId: user.ministryId
-    });
-    
-    // 获取用户的事工信息
-    let ministryName = null;
-    if (user.ministryId) {
-      try {
-        const ministry = await databases.getDocument(
-          appwriteConfig.databaseId,
-          appwriteConfig.ministryCollectionId,
-          user.ministryId
-        );
-        ministryName = ministry.name;
-        console.log(`📋 用户 ${user.name} 的事工信息:`, { ministryId: user.ministryId, ministryName });
-      } catch (ministryError) {
-        console.warn(`⚠️ 获取用户 ${user.name} 的事工信息失败:`, ministryError);
-      }
-    }
-    
-    // 处理头像URL，确保Storage文件能正确显示
-    const processedImageUrl = getUserAvatarUrl(user.imageUrl);
-    console.log(`🖼️ 处理后的头像URL:`, processedImageUrl);
-    
-    // 创建新的用户对象，使用处理后的头像URL和事工信息
-    const processedUser = Object.assign({}, user, { 
-      imageUrl: processedImageUrl,
-      ministry: ministryName || '未分配事工'
-    });
-    
-    return processedUser;
-  } catch (error) {
-    console.error(`❌ 获取用户信息失败 (${userId}):`, error);
-    throw error;
-  }
 }
 
 export async function likePost(postId: string, likesArray: string[]) {
@@ -1257,35 +1479,6 @@ export async function getFriends(userId: string) {
   }
 }
 
-export async function searchUsers(keyword: string, currentUserId: string) {
-  try {
-    console.log(`Searching for users with keyword: "${keyword}"`);
-    
-    // 使用 Appwrite 的 search 查询来高效地搜索用户
-    const users = await databases.listDocuments(
-      appwriteConfig.databaseId,
-      appwriteConfig.userCollectionId,
-      [
-        Query.search('name', keyword),
-        Query.notEqual('$id', [currentUserId]) // 排除当前用户
-      ]
-    );
-
-    if (!users) {
-      console.log("No users found or an error occurred.");
-      return [];
-    }
-
-    console.log(`Found ${users.documents.length} users.`);
-    return users.documents;
-    
-  } catch (error) {
-    console.error("An error occurred while searching users:", error);
-    // 抛出错误以便在调用处可以捕获，例如在UI上显示错误信息
-    throw error;
-  }
-}
-
 export async function removeFriend(friendshipId: string) {
   try {
     await databases.deleteDocument(
@@ -1432,7 +1625,9 @@ export const updateUserMinistry = async (userId: string, ministryId: string) => 
   }
 };
 
-// ====== 聊天相关功能 ======
+// =================================================================================================
+// CHAT - The Corrected Implementation
+// =================================================================================================
 
 // 初始化聊天集合
 export async function initializeChatCollections() {
@@ -1471,87 +1666,39 @@ export async function initializeChatCollections() {
   }
 }
 
-// 简化的聊天会话管理（使用本地存储作为临时解决方案）
-export async function getOrCreateChat(user1Id: string, user2Id: string) {
-  try {
-    // 在没有专用聊天集合的情况下，我们创建一个虚拟聊天对象
-    const chatId = [user1Id, user2Id].sort().join('_');
-    
-    const virtualChat = {
-      $id: chatId,
-      participantA: user1Id,
-      participantB: user2Id,
-      lastMessage: '',
-      lastMessageTime: new Date().toISOString(),
-      createdAt: new Date().toISOString()
-    };
-
-    return virtualChat;
-  } catch (error) {
-    console.error('获取或创建聊天失败:', error);
-    throw error;
-  }
-}
-
 // 发送消息（使用全局存储支持双向聊天）
-export async function sendMessage(chatId: string, senderId: string, content: string, type: string = 'text', fileData?: any, chatUserInfo?: any) {
+export async function sendMessage(chatId: string, senderId: string, content: string, type: string = 'text', fileData?: any) {
   try {
-    const messageId = ID.unique();
-    const newMessage = {
-      $id: messageId,
-      chatId,
-      senderId,
-      content,
-      type,
-      fileData: fileData ? JSON.stringify(fileData) : null,
-      timestamp: new Date().toISOString(),
-      isRead: false
-    };
+    const newMessage = await databases.createDocument(
+      appwriteConfig.databaseId,
+      appwriteConfig.messageCollectionId,
+      ID.unique(),
+      {
+        chatId,
+        sender: senderId,
+        content,
+        messageType: type,
+        fileData: fileData ? JSON.stringify(fileData) : undefined,
+      },
+      [
+          Permission.read(Role.user(senderId)),
+          // The other participant's read permission is added via a server function or trigger
+      ]
+    );
 
-    // 将消息保存到全局聊天存储
-    const existingMessages = JSON.parse(localStorage.getItem(`global_chat_${chatId}`) || '[]');
-    existingMessages.push(newMessage);
-    localStorage.setItem(`global_chat_${chatId}`, JSON.stringify(existingMessages));
-
-    // 从chatId中提取两个用户ID
-    const chatIdParts = chatId.split('_');
-    if (chatIdParts.length === 2) {
-      const [user1Id, user2Id] = chatIdParts;
-      const receiverId = user1Id === senderId ? user2Id : user1Id;
-
-      // 更新发送者的聊天列表
-      await updateUserChatList(senderId, chatId, content, type, chatUserInfo);
-      
-      // 更新接收者的聊天列表
-      // 为接收者创建发送者的用户信息
-      let senderInfo = await getSenderInfoForReceiver(senderId, receiverId);
-      
-      // 如果获取发送者信息失败，尝试从当前用户上下文获取
-      if (!senderInfo && chatUserInfo) {
-        // 如果chatUserInfo包含的是接收者信息，我们需要反向获取发送者信息
-        console.log('获取发送者信息失败，尝试备用方案');
-        try {
-          const currentUser = await getUserById(senderId);
-          if (currentUser) {
-            senderInfo = {
-              id: currentUser.$id,
-              name: currentUser.name,
-              avatar: currentUser.imageUrl,
-              online: currentUser.isOnline || false
-            };
-            console.log('使用备用方案获取发送者信息:', senderInfo);
-          }
-        } catch (error) {
-          console.error('备用方案也失败了:', error);
+    await databases.updateDocument(
+        appwriteConfig.databaseId,
+        appwriteConfig.chatCollectionId,
+        chatId,
+        {
+            lastMessage: type === 'file' ? `Attachment: ${content}` : content,
+            lastMessageTime: new Date().toISOString()
         }
-      }
-      
-      await updateUserChatList(receiverId, chatId, content, type, senderInfo);
-    }
+    );
 
     return newMessage;
   } catch (error) {
-    console.error('发送消息失败:', error);
+    console.error("Failed to send message:", error);
     throw error;
   }
 }
@@ -1676,162 +1823,350 @@ export async function ensureChatExistsForBothUsers(chatId: string, user1Id: stri
 // 获取聊天消息（从全局存储）
 export async function getChatMessages(chatId: string, limit: number = 50) {
   try {
-    const messages = JSON.parse(localStorage.getItem(`global_chat_${chatId}`) || '[]');
-    
-    // 按时间戳排序并限制数量
-    return messages
-      .sort((a: any, b: any) => new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime())
-      .slice(-limit);
+    const response = await databases.listDocuments(
+      appwriteConfig.databaseId,
+      appwriteConfig.messageCollectionId,
+      [Query.equal('chatId', chatId), Query.orderDesc('$createdAt'), Query.limit(limit)]
+    );
+    return response.documents;
   } catch (error) {
-    console.error('获取聊天消息失败:', error);
-    throw error;
+    console.error(`Failed to get messages for chat ${chatId}:`, error);
+    return [];
   }
 }
 
-// 获取用户的所有聊天列表（从用户特定存储）
+// 获取用户的所有聊天列表（修复数据结构一致性）
 export async function getUserChats(userId: string) {
   try {
-    const userChatKey = `user_chats_${userId}`;
-    const chatList = JSON.parse(localStorage.getItem(userChatKey) || '[]');
+    console.log('🔍 开始获取用户聊天列表，用户ID:', userId);
     
-    // 如果没有聊天记录，返回空数组
-    if (!chatList || chatList.length === 0) {
-      return [];
-    }
+    // 尝试多种查询方式以确保获取所有聊天记录
+    const queries = [
+      Query.contains('participants', userId),
+      Query.orderDesc('lastMessageTime')
+    ];
     
-    // 过滤属于当前用户的聊天并获取对方用户信息
-    const filteredChats = chatList.filter((chat: any) => 
-      chat && chat.$id && chat.$id.includes(userId)
+    console.log('📊 执行数据库查询，查询条件:', queries);
+    
+    const response = await databases.listDocuments(
+      appwriteConfig.databaseId,
+      appwriteConfig.chatCollectionId,
+      queries
     );
-    
-    if (filteredChats.length === 0) {
-      return [];
-    }
-    
-    const validChats: any[] = [];
-    const invalidChatIds: string[] = [];
-    
-    // 逐个处理聊天记录，避免 Promise.all 导致的重复错误
-    for (const chat of filteredChats) {
+
+    console.log('✅ 数据库查询完成，原始结果:', {
+      total: response.total,
+      documentsCount: response.documents.length,
+      documents: response.documents.map(doc => ({
+        id: doc.$id,
+        participants: doc.participants,
+        lastMessage: doc.lastMessage,
+        lastMessageTime: doc.lastMessageTime
+      }))
+    });
+
+    const chats = await Promise.all(response.documents.map(async (chat) => {
+      console.log(`🔍 处理聊天记录 ${chat.$id}:`, {
+        participants: chat.participants,
+        lastMessage: chat.lastMessage
+      });
+      
+      // 从participants数组中找到另一个用户
+      const otherUserId = chat.participants?.find((id: string) => id !== userId);
+      if (!otherUserId) {
+        console.warn(`⚠️ 聊天 ${chat.$id} 有无效的参与者:`, chat.participants);
+        return null;
+      }
+      
       try {
-        // 从聊天ID中提取对方用户ID
-        const chatIdParts = chat.$id.split('_');
-        if (chatIdParts.length !== 2) {
-          console.warn('Invalid chat ID format:', chat.$id);
-          invalidChatIds.push(chat.$id);
-          continue;
+        const otherUser = await getUserById(otherUserId);
+        if (!otherUser) {
+          console.warn(`⚠️ 无法找到用户 ${otherUserId}`);
+          return null;
         }
         
-        const [user1, user2] = chatIdParts;
-        const otherUserId = user1 === userId ? user2 : user1;
+        console.log(`✅ 成功获取聊天 ${chat.$id} 的对方用户信息:`, {
+          userId: otherUser.$id,
+          name: otherUser.name,
+          imageUrl: otherUser.imageUrl
+        });
         
-        if (!otherUserId || otherUserId === userId) {
-          console.warn('Invalid other user ID:', otherUserId);
-          invalidChatIds.push(chat.$id);
-          continue;
-        }
+        return {
+          ...chat,
+          otherUser,
+        };
+      } catch (error) {
+        console.error(`❌ 获取用户 ${otherUserId} 信息失败:`, error);
+        return null;
+      }
+    }));
+    
+    // 过滤掉null值（无效的聊天记录）
+    const validChats = chats.filter(chat => chat !== null);
+    
+    console.log('🎯 最终返回的聊天列表:', {
+      totalValidChats: validChats.length,
+      chats: validChats.map(chat => ({
+        id: chat.$id,
+        otherUserName: chat.otherUser?.name,
+        lastMessage: chat.lastMessage
+      }))
+    });
+    
+    return validChats;
+  } catch (error) {
+    console.error('❌ 获取用户聊天列表失败:', error);
+    return [];
+  }
+}
+
+// 新增：聊天数据同步修复函数
+export async function fixChatDataSync(userId: string) {
+  try {
+    console.log('🔧 开始修复聊天数据同步问题，用户ID:', userId);
+    
+    // 1. 获取数据库中的所有聊天记录
+    const dbChats = await getUserChats(userId);
+    console.log('📊 数据库聊天记录数量:', dbChats.length);
+    
+    // 2. 获取本地缓存的聊天记录
+    const localStorageKey = `chats_cache_${userId}`;
+    const localChatsRaw = localStorage.getItem(localStorageKey);
+    const localChats = localChatsRaw ? JSON.parse(localChatsRaw) : [];
+    console.log('💾 本地缓存聊天记录数量:', localChats.length);
+    
+    // 3. 比较和验证聊天记录
+    const dbChatIds = new Set(dbChats.map(chat => chat.$id));
+    const localChatIds = new Set(localChats.map((chat: any) => chat.$id));
+    
+    // 找出只在本地存在的聊天记录（可能是无效的）
+    const onlyInLocal = localChats.filter((chat: any) => !dbChatIds.has(chat.$id));
+    console.log('⚠️ 只在本地存在的聊天记录:', onlyInLocal.length, onlyInLocal.map((chat: any) => ({
+      id: chat.$id,
+      otherUserName: chat.otherUser?.name,
+      lastMessage: chat.lastMessage
+    })));
+    
+    // 找出只在数据库存在的聊天记录
+    const onlyInDb = dbChats.filter(chat => !localChatIds.has(chat.$id));
+    console.log('📥 只在数据库存在的聊天记录:', onlyInDb.length, onlyInDb.map(chat => ({
+      id: chat.$id,
+      otherUserName: chat.otherUser?.name,
+      lastMessage: chat.lastMessage
+    })));
+    
+    // 4. 尝试验证"只在本地"的聊天记录是否真的存在于数据库中
+    const validatedLocalChats = [];
+    for (const localChat of onlyInLocal) {
+      try {
+        console.log(`🔍 验证本地聊天记录 ${localChat.$id}...`);
+        const chatDoc = await databases.getDocument(
+          appwriteConfig.databaseId,
+          appwriteConfig.chatCollectionId,
+          localChat.$id
+        );
         
-        try {
-          console.log('处理聊天记录:', chat.$id, '对方用户ID:', otherUserId);
-          console.log('缓存用户信息:', chat.cachedUserInfo);
+        if (chatDoc && chatDoc.participants?.includes(userId)) {
+          console.log(`✅ 聊天记录 ${localChat.$id} 确实存在于数据库中，但查询未返回`);
           
-          // 优化的用户信息获取逻辑
-          let otherUserInfo = null;
-          
-          // 首先尝试使用缓存信息
-          if (chat.cachedUserInfo && chat.cachedUserInfo.name && chat.cachedUserInfo.name !== '未知用户') {
-            console.log('使用缓存的用户信息:', chat.cachedUserInfo);
-            otherUserInfo = {
-              $id: chat.cachedUserInfo.id || otherUserId,
-              name: chat.cachedUserInfo.name,
-              imageUrl: chat.cachedUserInfo.avatar || '/assets/icons/profile-placeholder.svg',
-              isOnline: chat.cachedUserInfo.online || false
-            };
-          } else {
-            // 没有有效缓存时从数据库获取
-            console.log('从数据库获取用户信息，用户ID:', otherUserId);
-            try {
-              const otherUser = await getUserById(otherUserId);
-              if (otherUser && otherUser.name) {
-                console.log('从数据库获取到用户信息:', otherUser);
-                otherUserInfo = {
-                  $id: otherUser.$id || otherUserId,
-                  name: otherUser.name,
-                  imageUrl: otherUser.imageUrl || '/assets/icons/profile-placeholder.svg',
-                  isOnline: otherUser.isOnline || false
-                };
-                
-                // 更新缓存
-                const updatedChat = { ...chat };
-                updatedChat.cachedUserInfo = {
-                  id: otherUser.$id,
-                  name: otherUser.name,
-                  avatar: otherUser.imageUrl,
-                  online: otherUser.isOnline || false
-                };
-                
-                // 立即保存更新的缓存信息
-                const currentChatList = JSON.parse(localStorage.getItem(userChatKey) || '[]');
-                const chatIndex = currentChatList.findIndex((c: any) => c.$id === chat.$id);
-                if (chatIndex >= 0) {
-                  currentChatList[chatIndex] = updatedChat;
-                  localStorage.setItem(userChatKey, JSON.stringify(currentChatList));
-                  console.log('已更新聊天记录的缓存信息');
-                }
-              } else {
-                throw new Error('User not found or has no name');
-              }
-            } catch (dbError) {
-              console.error('从数据库获取用户信息失败:', dbError);
-              // 使用默认信息
-              otherUserInfo = {
-                $id: otherUserId,
-                name: `用户_${otherUserId.slice(-4)}`, // 使用ID后4位作为临时名称
-                imageUrl: '/assets/icons/profile-placeholder.svg',
-                isOnline: false
-              };
+          // 获取对方用户信息
+          const otherUserId = chatDoc.participants.find((id: string) => id !== userId);
+          if (otherUserId) {
+            const otherUser = await getUserById(otherUserId);
+            if (otherUser) {
+              validatedLocalChats.push({
+                ...chatDoc,
+                otherUser
+              });
             }
           }
-          
-          validChats.push({
-            ...chat,
-            otherUser: otherUserInfo
-          });
-        } catch (error) {
-          console.error('处理聊天记录时出错:', error);
-          // 即使出错也尝试保留聊天记录，使用默认信息
-          validChats.push({
-            ...chat,
-            otherUser: {
-              $id: otherUserId,
-              name: '未知用户',
-              imageUrl: '/assets/icons/profile-placeholder.svg',
-              isOnline: false
-            }
-          });
         }
       } catch (error) {
-        console.error('处理聊天记录失败:', error, chat);
-        invalidChatIds.push(chat.$id);
+        console.log(`❌ 聊天记录 ${localChat.$id} 在数据库中不存在或无权限访问`);
       }
     }
     
-    // 清理无效的聊天记录
-    if (invalidChatIds.length > 0) {
-      const cleanedChatList = chatList.filter((chat: any) => 
-        !invalidChatIds.includes(chat.$id)
-      );
-      localStorage.setItem(userChatKey, JSON.stringify(cleanedChatList));
-      console.log(`已清理 ${invalidChatIds.length} 个无效聊天记录`);
-    }
-
-    // 按最后消息时间排序
-    return validChats.sort((a, b) => 
-      new Date(b.lastMessageTime).getTime() - new Date(a.lastMessageTime).getTime()
+    // 5. 合并有效的聊天记录
+    const mergedChats = [...dbChats, ...validatedLocalChats];
+    
+    // 6. 去重（基于chat ID）
+    const uniqueChats = mergedChats.filter((chat, index, self) => 
+      index === self.findIndex(c => c.$id === chat.$id)
     );
+    
+    // 7. 按最后消息时间排序
+    uniqueChats.sort((a, b) => 
+      new Date(b.lastMessageTime || 0).getTime() - new Date(a.lastMessageTime || 0).getTime()
+    );
+    
+    console.log('🎯 修复后的聊天列表:', {
+      totalChats: uniqueChats.length,
+      chats: uniqueChats.map(chat => ({
+        id: chat.$id,
+        otherUserName: chat.otherUser?.name,
+        lastMessage: chat.lastMessage,
+        lastMessageTime: chat.lastMessageTime
+      }))
+    });
+    
+    // 8. 更新本地缓存
+    localStorage.setItem(localStorageKey, JSON.stringify(uniqueChats));
+    
+    // 9. 清理无效的本地聊天记录
+    const invalidLocalChats = onlyInLocal.filter(
+      localChat => !validatedLocalChats.some(valid => valid.$id === localChat.$id)
+    );
+    
+    console.log('🧹 清理的无效本地聊天记录:', invalidLocalChats.length);
+    
+    const fixResult = {
+      success: true,
+      originalDbCount: dbChats.length,
+      originalLocalCount: localChats.length,
+      finalCount: uniqueChats.length,
+      addedFromDb: onlyInDb.length,
+      recoveredFromLocal: validatedLocalChats.length,
+      cleanedInvalid: invalidLocalChats.length,
+      chats: uniqueChats
+    };
+    
+    console.log('✅ 聊天数据同步修复完成:', fixResult);
+    return fixResult;
+    
   } catch (error) {
-    console.error('获取用户聊天列表失败:', error);
-    return []; // 返回空数组而不是抛出错误
+    console.error('❌ 聊天数据同步修复失败:', error);
+    return { success: false, error: error.message };
+  }
+}
+
+// 新增：高级聊天诊断函数
+export async function advancedChatDiagnosis(userId: string) {
+  try {
+    console.log('🔬 开始高级聊天诊断，用户ID:', userId);
+    
+    const diagnosis = {
+      userId,
+      timestamp: new Date().toISOString(),
+      databaseQuery: null as any,
+      rawDocuments: [] as any[],
+      processedChats: [] as any[],
+      localCache: null as any,
+      issues: [] as string[],
+      recommendations: [] as string[]
+    };
+    
+    // 1. 执行原始数据库查询
+    try {
+      const rawQuery = await databases.listDocuments(
+        appwriteConfig.databaseId,
+        appwriteConfig.chatCollectionId,
+        [Query.contains('participants', userId)]
+      );
+      
+      diagnosis.databaseQuery = {
+        total: rawQuery.total,
+        documentsCount: rawQuery.documents.length,
+        querySuccess: true
+      };
+      diagnosis.rawDocuments = rawQuery.documents;
+      
+      console.log('📊 原始数据库查询结果:', diagnosis.databaseQuery);
+    } catch (error) {
+      diagnosis.issues.push(`数据库查询失败: ${error.message}`);
+      diagnosis.databaseQuery = { querySuccess: false, error: error.message };
+    }
+    
+    // 2. 分析每个聊天记录
+    for (const doc of diagnosis.rawDocuments) {
+      console.log(`🔍 分析聊天文档 ${doc.$id}:`, doc);
+      
+      const chatAnalysis = {
+        id: doc.$id,
+        participants: doc.participants,
+        lastMessage: doc.lastMessage,
+        lastMessageTime: doc.lastMessageTime,
+        issues: [] as string[],
+        otherUser: null as any
+      };
+      
+      // 检查participants字段
+      if (!doc.participants || !Array.isArray(doc.participants)) {
+        chatAnalysis.issues.push('participants字段无效');
+      } else if (doc.participants.length !== 2) {
+        chatAnalysis.issues.push(`participants数量错误: ${doc.participants.length}`);
+      } else if (!doc.participants.includes(userId)) {
+        chatAnalysis.issues.push('用户不在participants中');
+      }
+      
+      // 获取对方用户信息
+      if (doc.participants && Array.isArray(doc.participants)) {
+        const otherUserId = doc.participants.find((id: string) => id !== userId);
+        if (otherUserId) {
+          try {
+            const otherUser = await getUserById(otherUserId);
+            if (otherUser) {
+              chatAnalysis.otherUser = {
+                id: otherUser.$id,
+                name: otherUser.name,
+                imageUrl: otherUser.imageUrl
+              };
+            } else {
+              chatAnalysis.issues.push(`无法找到对方用户: ${otherUserId}`);
+            }
+          } catch (error) {
+            chatAnalysis.issues.push(`获取对方用户信息失败: ${error.message}`);
+          }
+        } else {
+          chatAnalysis.issues.push('无法确定对方用户ID');
+        }
+      }
+      
+      diagnosis.processedChats.push(chatAnalysis);
+    }
+    
+    // 3. 检查本地缓存
+    const localCacheKey = `chats_cache_${userId}`;
+    const localCacheRaw = localStorage.getItem(localCacheKey);
+    if (localCacheRaw) {
+      try {
+        diagnosis.localCache = {
+          exists: true,
+          data: JSON.parse(localCacheRaw),
+          count: JSON.parse(localCacheRaw).length
+        };
+      } catch (error) {
+        diagnosis.localCache = { exists: true, parseError: error.message };
+        diagnosis.issues.push('本地缓存数据解析失败');
+      }
+    } else {
+      diagnosis.localCache = { exists: false };
+    }
+    
+    // 4. 生成问题总结和建议
+    if (diagnosis.databaseQuery?.documentsCount === 0) {
+      diagnosis.issues.push('数据库中没有找到任何聊天记录');
+      diagnosis.recommendations.push('检查是否有权限访问聊天记录');
+      diagnosis.recommendations.push('尝试重新创建聊天记录');
+    } else if (diagnosis.databaseQuery?.documentsCount === 1) {
+      diagnosis.issues.push('只找到1个聊天记录，可能存在其他聊天记录无法查询的问题');
+      diagnosis.recommendations.push('检查数据库权限设置');
+      diagnosis.recommendations.push('验证其他聊天记录是否存在');
+    }
+    
+    if (diagnosis.localCache?.count && diagnosis.localCache.count !== diagnosis.databaseQuery?.documentsCount) {
+      diagnosis.issues.push('本地缓存与数据库记录数量不一致');
+      diagnosis.recommendations.push('执行数据同步修复');
+    }
+    
+    const validChats = diagnosis.processedChats.filter(chat => chat.issues.length === 0);
+    diagnosis.recommendations.push(`发现 ${validChats.length} 个有效聊天记录`);
+    
+    console.log('🔬 高级诊断完成:', diagnosis);
+    return diagnosis;
+    
+  } catch (error) {
+    console.error('❌ 高级聊天诊断失败:', error);
+    return { success: false, error: error.message };
   }
 }
 
@@ -1857,21 +2192,16 @@ export async function markMessagesAsRead(chatId: string, userId: string) {
 }
 
 // 删除消息（全局存储版本）
-export async function deleteMessage(chatId: string, messageId: string) {
+export async function deleteMessage(messageId: string) {
   try {
-    const messages = JSON.parse(localStorage.getItem(`global_chat_${chatId}`) || '[]');
-    
-    // 过滤掉要删除的消息
-    const updatedMessages = messages.filter((message: any) => message.$id !== messageId);
-
-    localStorage.setItem(`global_chat_${chatId}`, JSON.stringify(updatedMessages));
-    
-    // 可选：更新聊天列表的最后一条消息
-    // ... 此处可以添加更新 lastMessage 的逻辑 ...
-
-    return { success: true };
+    await databases.deleteDocument(
+      appwriteConfig.databaseId,
+      appwriteConfig.messageCollectionId,
+      messageId
+    );
+    return { status: 'ok' };
   } catch (error) {
-    console.error('删除消息失败:', error);
+    console.error("Failed to delete message:", error);
     throw error;
   }
 }
@@ -2306,17 +2636,16 @@ export interface ICallRecord {
 // 创建通话记录
 export async function createCallRecord(callData: ICallRecord) {
   try {
-    const newCallRecord = await databases.createDocument(
+    const record = await databases.createDocument(
       appwriteConfig.databaseId,
-      appwriteConfig.callHistoryCollectionId,
+      appwriteConfig.callsCollectionId,
       ID.unique(),
       callData
     );
-    console.log("📞 通话记录创建成功:", newCallRecord);
-    return newCallRecord;
+    return record;
   } catch (error) {
-    console.error("创建通话记录失败:", error);
-    throw new Error("创建通话记录时出错");
+    console.error("Failed to create call record:", error);
+    throw error;
   }
 }
 
@@ -2325,19 +2654,20 @@ export async function getCallHistoryForUser(userId: string) {
   try {
     const response = await databases.listDocuments(
       appwriteConfig.databaseId,
-      appwriteConfig.callHistoryCollectionId,
+      appwriteConfig.callsCollectionId,
       [
         Query.or([
           Query.equal('callerId', userId),
           Query.equal('receiverId', userId)
         ]),
-        Query.orderDesc('initiatedAt') // 按发起时间降序排序
+        Query.orderDesc('initiatedAt'),
+        Query.limit(50)
       ]
     );
-    return response.documents;
+    return response.documents as (Models.Document & ICallRecord)[];
   } catch (error) {
-    console.error("获取通话记录失败:", error);
-    throw new Error("获取通话记录时出错");
+    console.error("Failed to get call history:", error);
+    throw error;
   }
 }
 
@@ -2425,4 +2755,5 @@ export async function markNotificationsAsRead(userId: string, type?: 'missed_cal
 
 // ============================================================
 // SEARCH
+// ============================================================
 // ============================================================

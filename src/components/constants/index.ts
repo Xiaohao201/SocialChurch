@@ -5,6 +5,11 @@ export const sidebarLinks = [
     label: "首页",
   },
   {
+    imgURL: "/assets/icons/people.svg",
+    route: "/friends",
+    label: "好友",
+  },
+  {
     imgURL: "/assets/icons/profile.svg",
     route: "/profile",
     label: "个人",

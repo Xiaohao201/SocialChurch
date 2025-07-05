@@ -2,10 +2,11 @@ import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/u
 import { Button } from "@/components/ui/button";
 import { IUserWithFriendship } from "@/types";
 import { useNavigate } from "react-router-dom";
-import { useState, useEffect } from "react";
+import { useState, useEffect, useMemo } from "react";
 import { useToast } from "@/components/ui/use-toast";
 import { getFriends, getUserById, getMinistryById, getUserOnlineStatus } from "@/lib/appwrite/api";
 import { client, appwriteConfig } from "@/lib/appwrite/config";
+import ImprovedFilePreview from "./ImprovedFilePreview.tsx";
 
 type UserProfileModalProps = {
   user: IUserWithFriendship | null;
@@ -19,15 +20,6 @@ type UserProfileModalProps = {
   currentUserId?: string;
   showActions?: boolean;
 };
-
-interface SharedFile {
-  id: string;
-  name: string;
-  type: 'pdf' | 'image' | 'video' | 'doc' | 'other';
-  url: string;
-  size: string;
-  timestamp: string;
-}
 
 const UserProfileModal = ({ 
   user, 
@@ -44,8 +36,6 @@ const UserProfileModal = ({
   const { toast } = useToast();
   const navigate = useNavigate();
   
-  const [activeTab, setActiveTab] = useState<'profile' | 'shared-files'>('profile');
-  const [sharedFiles, setSharedFiles] = useState<SharedFile[]>([]);
   const [detailedUser, setDetailedUser] = useState<IUserWithFriendship | null>(null);
   const [isLoading, setIsLoading] = useState(true);
   const [ministryName, setMinistryName] = useState<string>('');
@@ -118,34 +108,10 @@ const UserProfileModal = ({
     };
   }, [isOpen, user?.$id, toast]);
 
-  useEffect(() => {
-    if (isOpen) {
-      // 模拟共享文件数据
-      setSharedFiles([
-        {
-          id: '1',
-          name: '项目文档.pdf',
-          type: 'pdf',
-          url: '/path/to/document.pdf',
-          size: '2.5MB',
-          timestamp: '2024-01-20'
-        },
-        {
-          id: '2',
-          name: '设计稿.png',
-          type: 'image',
-          url: '/path/to/design.png',
-          size: '1.8MB',
-          timestamp: '2024-01-19'
-        }
-      ]);
-    }
-  }, [isOpen]);
-
   const handleStartChat = () => {
     if (user && user.$id) {
       onClose();
-      navigate(`/home?chat=${user.$id}&name=${encodeURIComponent(user.name || '')}&avatar=${encodeURIComponent(user.imageUrl || '')}`);
+      navigate(`/home?with=${user.$id}`);
     }
   };
 
@@ -188,6 +154,36 @@ const UserProfileModal = ({
       case 'doc': return '📝';
       default: return '📎';
     }
+  };
+
+  const renderFileThumbnail = (file: any) => {
+    const fileType = file.fileData?.type || '';
+    const fileUrl = file.fileData?.url || '';
+
+    if (fileType.startsWith('image/')) {
+      return <img src={fileUrl} alt={file.content} className="w-full h-full object-cover" />;
+    }
+    if (fileType.startsWith('video/')) {
+      return (
+        <div className="relative w-full h-full">
+          <video src={fileUrl} className="w-full h-full object-cover" />
+          <div className="absolute inset-0 bg-black/30 flex items-center justify-center">
+            <div className="w-8 h-8 bg-white/80 rounded-full flex items-center justify-center">
+              <svg className="w-4 h-4 text-black" fill="currentColor" viewBox="0 0 20 20"><path d="M4 4a2 2 0 00-2 2v8a2 2 0 002 2h12a2 2 0 002-2V6a2 2 0 00-2-2H4zm3.5 2.5a1.5 1.5 0 11-3 0 1.5 1.5 0 013 0zM15 13H5a1 1 0 00-1 1v.5a1.5 1.5 0 001.5 1.5h9A1.5 1.5 0 0016 14.5V14a1 1 0 00-1-1z"></path></svg>
+            </div>
+          </div>
+        </div>
+      );
+    }
+    return getFileIcon(fileType);
+  };
+
+  const formatFileSize = (bytes: number) => {
+    if (!bytes) return '0 B';
+    const k = 1024;
+    const sizes = ['B', 'KB', 'MB', 'GB'];
+    const i = Math.floor(Math.log(bytes) / Math.log(k));
+    return parseFloat((bytes / Math.pow(k, i)).toFixed(1)) + ' ' + sizes[i];
   };
 
   const formatDate = (dateString: string) => {
@@ -257,120 +253,51 @@ const UserProfileModal = ({
                 )}
               </div>
 
-              {/* 标签页导航 */}
-              <div className="flex border-b border-gray-200">
-                <button
-                  onClick={() => setActiveTab('profile')}
-                  className={`flex-1 py-3 px-4 text-sm font-medium border-b-2 transition-colors ${
-                    activeTab === 'profile'
-                      ? 'border-primary-500 text-primary-500'
-                      : 'border-transparent text-soft-gray hover:text-warm-gray'
-                  }`}
-                >
-                  个人资料
-                </button>
-                <button
-                  onClick={() => setActiveTab('shared-files')}
-                  className={`flex-1 py-3 px-4 text-sm font-medium border-b-2 transition-colors ${
-                    activeTab === 'shared-files'
-                      ? 'border-primary-500 text-primary-500'
-                      : 'border-transparent text-soft-gray hover:text-warm-gray'
-                  }`}
-                >
-                  文件共享
-                </button>
+              {/* 个人资料 */}
+              <div className="space-y-6">
+                {/* 基本信息 */}
+                <div>
+                  <h4 className="text-warm-gray font-medium mb-3">
+                    基本信息
+                  </h4>
+                  <div className="space-y-3 bg-white rounded-lg p-4 border border-gray-200">
+                    <div className="flex justify-between">
+                      <span className="text-soft-gray">性别:</span>
+                      <span className="text-warm-gray">{getGenderDisplay(detailedUser?.gender || 'unknown')}</span>
+                    </div>
+                    
+                    <div className="flex justify-between">
+                      <span className="text-soft-gray">事工:</span>
+                      <span className="text-warm-gray">{ministryName || '暂无'}</span>
+                    </div>
+
+                    <div className="flex justify-between">
+                      <span className="text-soft-gray">状态:</span>
+                      <span className={`text-warm-gray ${isOnline ? 'text-green-500' : 'text-gray-500'}`}>
+                        {isOnline ? '🟢 在线' : '⚫ 离线'}
+                      </span>
+                    </div>
+                  </div>
+                </div>
+
+                {/* 信仰经历 */}
+                <div>
+                  <h4 className="text-warm-gray font-medium mb-3">信仰经历</h4>
+                  <div className="space-y-3 bg-white rounded-lg p-4 border border-gray-200">
+                    {detailedUser?.dateOfFaith && (
+                      <div className="flex justify-between">
+                        <span className="text-soft-gray">信主日期:</span>
+                        <span className="text-warm-gray">{formatDate(detailedUser.dateOfFaith.toString())}</span>
+                      </div>
+                    )}
+                    <div>
+                        <p className="text-warm-gray text-sm leading-relaxed mt-1">
+                          {detailedUser?.faithTestimony || '暂无见证分享'}
+                        </p>
+                    </div>
+                  </div>
+                </div>
               </div>
-
-              {/* 个人资料标签页 */}
-              {activeTab === 'profile' && (
-                <div className="space-y-6">
-                  {/* 基本信息 */}
-                  <div>
-                    <h4 className="text-warm-gray font-medium mb-3">
-                      基本信息
-                    </h4>
-                    <div className="space-y-3 bg-white rounded-lg p-4 border border-gray-200">
-                      <div className="flex justify-between">
-                        <span className="text-soft-gray">性别:</span>
-                        <span className="text-warm-gray">{getGenderDisplay(detailedUser?.gender || 'unknown')}</span>
-                      </div>
-                      
-                      <div className="flex justify-between">
-                        <span className="text-soft-gray">事工:</span>
-                        <span className="text-warm-gray">{ministryName || '暂无'}</span>
-                      </div>
-
-                      <div className="flex justify-between">
-                        <span className="text-soft-gray">状态:</span>
-                        <span className={`text-warm-gray ${isOnline ? 'text-green-500' : 'text-gray-500'}`}>
-                          {isOnline ? '🟢 在线' : '⚫ 离线'}
-                        </span>
-                      </div>
-                    </div>
-                  </div>
-
-                  {/* 信仰经历 */}
-                  <div>
-                    <h4 className="text-warm-gray font-medium mb-3">信仰经历</h4>
-                    <div className="space-y-3 bg-white rounded-lg p-4 border border-gray-200">
-                      {detailedUser?.dateOfFaith && (
-                        <div className="flex justify-between">
-                          <span className="text-soft-gray">信主日期:</span>
-                          <span className="text-warm-gray">{formatDate(detailedUser.dateOfFaith.toString())}</span>
-                        </div>
-                      )}
-                      <div>
-                          <p className="text-warm-gray text-sm leading-relaxed mt-1">
-                            {detailedUser?.faithTestimony || '暂无见证分享'}
-                          </p>
-                      </div>
-                    </div>
-                  </div>
-                </div>
-              )}
-
-              {/* 文件共享标签页 */}
-              {activeTab === 'shared-files' && (
-                <div className="space-y-4">
-                  <div className="flex items-center justify-between">
-                    <h4 className="text-warm-gray font-medium">文件共享</h4>
-                    <span className="text-soft-gray text-sm">{sharedFiles.length} 个文件</span>
-                  </div>
-
-                  {sharedFiles.length > 0 ? (
-                    <div className="space-y-2">
-                      {sharedFiles.map((file) => (
-                        <div
-                          key={file.id}
-                          className="flex items-center gap-3 p-3 bg-white rounded-lg hover:bg-gray-100 transition-colors cursor-pointer"
-                        >
-                          <div className="w-10 h-10 bg-gray-200 rounded-lg flex items-center justify-center text-lg">
-                            {getFileIcon(file.type)}
-                          </div>
-                          <div className="flex-1 min-w-0">
-                            <p className="text-warm-gray text-sm font-medium truncate">{file.name}</p>
-                            <div className="flex items-center gap-2 mt-1">
-                              <span className="text-soft-gray text-xs">{file.timestamp}</span>
-                              <span className="text-soft-gray text-xs">•</span>
-                              <span className="text-soft-gray text-xs">{file.size}</span>
-                            </div>
-                          </div>
-                          <Button variant="ghost" size="sm" className="text-soft-gray hover:text-warm-gray">
-                            <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 10v6m0 0l-3-3m3 3l3-3m2 8H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
-                            </svg>
-                          </Button>
-                        </div>
-                      ))}
-                    </div>
-                  ) : (
-                    <div className="text-center py-8 bg-gray-200 rounded-lg">
-                      <div className="text-4xl mb-2">📁</div>
-                      <p className="text-soft-gray">暂无共享文件</p>
-                    </div>
-                  )}
-                </div>
-              )}
             </div>
           )}
 

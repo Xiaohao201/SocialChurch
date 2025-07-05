@@ -6,6 +6,8 @@ import { sidebarLinks } from '../constants';
 import { Button } from '../ui/button';
 import { useSignOutAccount } from '@/lib/react-query/queriesAndMutations';
 import { getUnreadNotificationsCount, markNotificationsAsRead } from '@/lib/appwrite/api';
+import { useNotificationContext } from '@/context/NotificationContext';
+import { useChatContext } from '@/context/ChatContext';
 
 const LeftSidebar = () => {
     const { user, setUser, setIsAuthenticated } = useUserContext();
@@ -13,6 +15,8 @@ const LeftSidebar = () => {
     const { pathname } = useLocation();
     const { mutate: signOut, isSuccess } = useSignOutAccount();
     const [unreadCount, setUnreadCount] = useState(0);
+    const { friendRequestCount, setFriendRequestCount } = useNotificationContext();
+    const { totalUnreadCount } = useChatContext();
 
     const fetchUnreadCount = async () => {
         if (user.id) {
@@ -34,6 +38,10 @@ const LeftSidebar = () => {
         }
     };
 
+    const handleFriendsClick = () => {
+        setFriendRequestCount(0);
+    };
+
     useEffect(() => {
         if (isSuccess) {
             setUser({
@@ -48,13 +56,13 @@ const LeftSidebar = () => {
     }, [isSuccess, navigate, setUser, setIsAuthenticated]);
 
     return (
-        <nav className='leftsidebar'>
+        <nav className='leftsidebar bg-sidebar-gray'>
             <div className='flex flex-col gap-11'>
                 <Link to='/' className='flex items-center gap-3'>
                     <img src="/assets/images/logo.png" alt="logo" 
                     width={56} height={56} />
                     <h2
-                    className='text-dark-1 text-2xl font-bold'
+                    className='text-charcoal text-2xl font-bold'
                     >
                         教会社交软件
                     </h2>
@@ -72,8 +80,8 @@ const LeftSidebar = () => {
                             />
 
                             <div className='flex flex-col'>
-                                <p className='text-dark-1 text-l font-bold'>{user.name}</p>
-                                <p className='small-regular text-light-3'>
+                                <p className='text-charcoal text-l font-bold'>{user.name}</p>
+                                <p className='small-regular text-warm-gray'>
                                     {user.ministry ? `📋 ${user.ministry}` : '📋 未分配事工'}
                                 </p>
                             </div>
@@ -90,28 +98,30 @@ const LeftSidebar = () => {
                         const routePath = link.route === '/profile' ? `/profile/${user.$id}` : link.route;
                         
                         return (
-                            <li key={link.label} className={`leftsidebar-link ${isActive ? 'active' : ''} relative`}>
+                            <li key={link.label} className={`leftsidebar-link group relative ${isActive && 'bg-accent-blue rounded-lg'}`}>
                                 <NavLink 
                                     to={routePath}
-                                    className={({ isActive: navIsActive }) => 
-                                        `flex gap-4 items-center p-4 transition-all ${
-                                            isActive ? 'text-white font-semibold' : 'text-warm-gray hover:text-dark-1'
-                                        }`
-                                    }
-                                    onClick={link.route === '/call-history' ? handleCallHistoryClick : undefined}
+                                    className="flex gap-4 items-center p-4"
+                                    onClick={link.route === '/call-history' ? handleCallHistoryClick : link.route === '/friends' ? handleFriendsClick : undefined}
                                 >
                                     <div className="relative">
                                         <img 
                                             src={link.imgURL}
                                             alt={link.label}
-                                            className={`w-5 h-5 transition-all ${
-                                                isActive ? 'brightness-0 invert' : ''
-                                            }`}
+                                            className={`group-hover:invert-white w-5 h-5 transition-all ${isActive ? 'invert-white' : ''}`}
                                         />
+                                        {link.route === '/home' && totalUnreadCount > 0 && (
+                                            <span className="absolute -top-1 -right-1 w-5 h-5 text-xs flex items-center justify-center bg-notification-red text-white rounded-full">
+                                                {totalUnreadCount}
+                                            </span>
+                                        )}
+                                        {link.route === '/friends' && friendRequestCount > 0 && (
+                                            <span className="absolute top-0 right-0 w-2.5 h-2.5 bg-notification-red rounded-full"></span>
+                                        )}
                                     </div>
-                                    <span>{link.label}</span>
+                                    <span className={`group-hover:text-white ${isActive ? 'text-white' : 'text-charcoal'}`}>{link.label}</span>
                                     {link.route === '/call-history' && unreadCount > 0 && (
-                                        <span className="ml-auto w-5 h-5 text-xs flex items-center justify-center bg-red-500 text-white rounded-full">
+                                        <span className="ml-auto w-5 h-5 text-xs flex items-center justify-center bg-notification-red text-white rounded-full">
                                             {unreadCount}
                                         </span>
                                     )}
@@ -127,7 +137,7 @@ const LeftSidebar = () => {
                 onClick={() => signOut()}>
                 <img src="/assets/icons/logout.svg" 
                      alt="logout" />
-                <p className='small-medium lg:base-medium logout-button-text'>登出</p>
+                <p className='small-medium lg:base-medium logout-button-text text-charcoal'>登出</p>
             </Button>
         </nav>
     )

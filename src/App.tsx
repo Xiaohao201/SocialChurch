@@ -3,6 +3,7 @@ import Home from './_root/pages/ModernChat'
 import Profile from './_root/pages/Profile'
 import UpdateProfile from './_root/pages/UpdateProfile'
 import CallHistory from './_root/pages/CallHistory'
+import Friends from './_root/pages/Friends'
 import './globals.css'
 import SigninForm from './_auth/forms/SigninForm'
 import AuthLayout from './_auth/AuthLayout'
@@ -94,6 +95,7 @@ const App = () => {
         <Route element={<AuthGuard><RootLayout /></AuthGuard>}>
           <Route index element={<Home />} />
           <Route path="/home" element={<Home />} />
+          <Route path="/friends" element={<Friends />} />
           <Route path="/profile/:id/*" element={<Profile />} />
           <Route path="/update-profile/:id" element={<UpdateProfile />} />
           <Route path="/change-password" element={<ChangePasswordForm />} />

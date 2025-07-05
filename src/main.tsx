@@ -1,21 +1,30 @@
+import React from 'react';
 import ReactDOM from "react-dom/client";
 import { BrowserRouter } from "react-router-dom";
-import App from "./App";
-import AuthProvider from "./context/AuthContext";
-import { QueryProvider } from "./lib/react-query/QueryProvider";
-import { AudioProvider } from "./context/AudioContext";
-import { CallProvider } from "./context/CallContext";
+import App from "./App.tsx";
+import AuthProvider from './context/AuthContext.tsx'
+import { QueryProvider } from './lib/react-query/QueryProvider.tsx'
+import { NotificationProvider } from './context/NotificationContext.tsx'
+import { ChatProvider } from './context/ChatContext.tsx'
+import { AudioProvider } from "./context/AudioContext.tsx";
+import { CallProvider } from "./context/CallContext.tsx";
 
 ReactDOM.createRoot(document.getElementById('root')!).render(
-    <BrowserRouter>
-        <QueryProvider>
-            <AuthProvider>
-                <AudioProvider>
-                    <CallProvider>
-                        <App />
-                    </CallProvider>
-                </AudioProvider>
-            </AuthProvider>
-        </QueryProvider>
-    </BrowserRouter>
+    <React.StrictMode>
+        <BrowserRouter>
+            <QueryProvider>
+                <AuthProvider>
+                    <NotificationProvider>
+                        <ChatProvider>
+                            <AudioProvider>
+                                <CallProvider>
+                                    <App />
+                                </CallProvider>
+                            </AudioProvider>
+                        </ChatProvider>
+                    </NotificationProvider>
+                </AuthProvider>
+            </QueryProvider>
+        </BrowserRouter>
+    </React.StrictMode>,
 )
