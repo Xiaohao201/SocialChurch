@@ -19,12 +19,11 @@ interface FileData {
 interface FileAggregationProps {
   files: FileData[];
   isMyMessage: boolean;
+  onDownloadAll?: () => void;
   showAvatar?: boolean;
   isFirstInGroup?: boolean;
   isLastInGroup?: boolean;
   timestamp?: string;
-  onDownloadAll?: () => void;
-  onContextMenu?: (event: React.MouseEvent) => void;
 }
 
 // File type grouping
@@ -269,8 +268,7 @@ const FileAggregation: React.FC<FileAggregationProps> = ({
   isFirstInGroup = true,
   isLastInGroup = true,
   timestamp,
-  onDownloadAll,
-  onContextMenu
+  onDownloadAll
 }) => {
   const [showPreview, setShowPreview] = useState(false);
   const [previewIndex, setPreviewIndex] = useState(0);
@@ -383,7 +381,6 @@ const FileAggregation: React.FC<FileAggregationProps> = ({
       className={`flex items-end gap-2 ${isFirstInGroup ? 'mt-2' : 'mt-0.5'} 
         ${isMyMessage ? "ml-auto flex-row-reverse" : "mr-auto"}
         ${isLastInGroup ? 'mb-1.5' : 'mb-0.5'} max-w-[85%]`}
-      onContextMenu={onContextMenu}
     >
       {/* Avatar placeholder */}
       {!isMyMessage && showAvatar && isLastInGroup ? (

@@ -1,31 +1,42 @@
-import { Account, ID, Query, Models, Permission, Role } from 'appwrite'
-
-import { INewPost, INewUser, IUpdatePost, IUpdateUser, INotification, IUserWithFriendship } from "@/types";
+import { Account, ID, Query, Models, Permission, Role } from 'appwrite';
+import { INewPost, INewUser, IUpdatePost, IUpdateUser, INotification, IUserWithFriendship, DisappearingMessageDuration, IDisappearingMessageSettings } from "@/types";
 import { account, appwriteConfig, avatars, client, databases, storage } from './config';
 
 // =================================================================================================
 // TYPE DEFINITIONS
 // =================================================================================================
 
-// Define an explicit type for a chat document
 export type ChatDocument = Models.Document & {
   participants: string[];
   lastMessage?: string;
   lastMessageTime?: string;
+  isGroup?: boolean;
+  name?: string;
+  avatar?: string;
+  admins?: string[];
+  createdBy?: string;
 };
 
-// Define an explicit type for a user document
 export type UserDocument = Models.Document & {
   name: string;
   email: string;
   imageUrl: string;
+  ministryId?: string;
+  isOnline?: boolean;
+  lastSeen?: string;
+  accountId: string;
+  initialPassword?: string;
+  gender?: 'male' | 'female' | 'unknown';
+  dateOfFaith?: string;
+  faithTestimony?: string;
 };
 
-// Define the shape of a chat object used in the UI
 export type UIChat = ChatDocument & {
-  otherUser: UserDocument;
+  otherUser?: UserDocument | null;
+  isGroup?: boolean;
+  name?: string;
+  avatar?: string;
 };
-
 
 // =================================================================================================
 // AUTHENTICATION & USER MANAGEMENT
@@ -40,7 +51,7 @@ export async function createUserAccount(user: INewUser) {
         user.name
       );
 
-      if (!newAccount) throw Error;
+    if (!newAccount) throw new Error("Failed to create account");
   
       const avatarUrl = avatars.getInitials(user.name).toString();
   
@@ -50,19 +61,20 @@ export async function createUserAccount(user: INewUser) {
         email: newAccount.email,
         ministryId: user.ministryId,
         imageUrl: avatarUrl,
-        initialPassword: user.password
+      initialPassword: user.password
       });
   
       if(!newUser) {
-        await account.deleteSession('current');
-        throw Error('Failed to save user to database');
+      // Clean up failed registration
+      await account.deleteSession('current');
+      throw new Error('Failed to save user to database');
       }
 
       return newAccount;
     } catch (error: any) {
       console.error("createUserAccount error:", error);
       if (error.code === 409) {
-        throw new Error("邮箱已注册，请直接登录");
+      throw new Error("An account with this email already exists.");
       }
       throw error;
     }
@@ -86,93 +98,66 @@ export async function saveUserToDB(user: {
         email: user.email,
         name: user.name,
         imageUrl: user.imageUrl || `https://api.dicebear.com/6.x/initials/svg?seed=${user.name}`,
-        ministryId: user.ministryId || '',
-        initialPassword: user.initialPassword || 'DefaultPassword123',
+        ministryId: user.ministryId || null,
+        initialPassword: user.initialPassword,
         isOnline: false,
         lastSeen: new Date().toISOString(),
       },
       [
-        Permission.read(Role.users()),
-        Permission.update(Role.users()),
-        Permission.delete(Role.users())
+        Permission.read(Role.any()), // Make user profiles public
+        Permission.update(Role.user(user.accountId)), // User can update their own profile
+        Permission.delete(Role.user(user.accountId)), // User can delete their own profile
       ]
     );
 
-    return newUser;
+    return newUser as UserDocument;
   } catch (error) {
     console.error('Error saving user to DB:', error);
-    if (error instanceof Error) {
-      console.error('Error details:', {
-        message: error.message,
-        stack: error.stack,
-        name: error.name
-      });
-    }
     throw error;
   }
 }
 
-async function checkSession() {
-    try {
-        const session = await account.get();
-        return session;
-    } catch (error) {
-        return null;
-    }
-}
-
 export async function signInAccount(credentials: { email: string; password: string }) {
     try {
-        const session = await checkSession();
-        if (session) {
-            await logoutCurrentSession();
-        }
+    // End any existing session to ensure a clean login
+    await account.deleteSession('current').catch(() => {});
 
         const newSession = await account.createEmailPasswordSession(credentials.email, credentials.password);
         const currentAccount = await account.get();
         
-        const userInDB = await databases.listDocuments(
+    const userQuery = await databases.listDocuments(
             appwriteConfig.databaseId,
             appwriteConfig.userCollectionId,
             [Query.equal('accountId', currentAccount.$id)]
         );
 
-        if (userInDB.documents.length === 0) {
-            const defaultMinistry = await initializeDefaultMinistry();
-            const avatarUrl = avatars.getInitials(currentAccount.name).toString();
-            await saveUserToDB({
-                accountId: currentAccount.$id,
-                name: currentAccount.name,
-                email: currentAccount.email,
-                ministryId: defaultMinistry.$id,
-                imageUrl: avatarUrl,
-                initialPassword: 'DefaultPassword123'
-            });
-        } else {
-            await updateUserOnlineStatus(userInDB.documents[0].$id, true);
+    if (userQuery.documents.length > 0) {
+      await updateUserOnlineStatus(userQuery.documents[0].$id, true);
+    } else {
+       // This case is for users who were authenticated in Appwrite but not in our DB
+                const defaultMinistry = await initializeDefaultMinistry();
+       await saveUserToDB({
+                    accountId: currentAccount.$id,
+                    name: currentAccount.name,
+                    email: currentAccount.email,
+           ministryId: defaultMinistry?.$id,
+           imageUrl: avatars.getInitials(currentAccount.name).toString(),
+       });
         }
 
         return newSession;
     } catch (error: any) {
         if (error.code === 401) {
-            throw new Error('邮箱或密码错误');
+      throw new Error('Incorrect email or password.');
         }
+    console.error("Sign in error:", error);
         throw error;
     }
 }
 
-async function logoutCurrentSession() {
-    try {
-        await account.deleteSession('current');
-    } catch (error) {
-        console.error('Error deleting session:', error);
-    }
-}
-
-export async function getCurrentUser() {
+export async function getCurrentUser(): Promise<(UserDocument & { ministry?: any }) | null> {
   try {
     const currentAccount = await account.get();
-    if (!currentAccount) throw new Error("No user account found.");
 
     const userQuery = await databases.listDocuments(
       appwriteConfig.databaseId,
@@ -180,22 +165,14 @@ export async function getCurrentUser() {
       [Query.equal('accountId', currentAccount.$id)]
     );
 
-    if (userQuery.documents.length === 0) {
-        const defaultMinistry = await initializeDefaultMinistry();
-        return await saveUserToDB({
-            accountId: currentAccount.$id,
-            name: currentAccount.name,
-            email: currentAccount.email,
-            ministryId: defaultMinistry.$id,
-            imageUrl: avatars.getInitials(currentAccount.name).toString(),
-        });
-    }
+    if (userQuery.documents.length === 0) return null;
 
-    const currentUser = userQuery.documents[0];
+    const currentUser = userQuery.documents[0] as UserDocument;
+
     if (currentUser.ministryId) {
         const ministry = await databases.getDocument(
-            appwriteConfig.databaseId, 
-            appwriteConfig.ministryCollectionId, 
+          appwriteConfig.databaseId,
+          appwriteConfig.ministryCollectionId,
             currentUser.ministryId
         );
         return { ...currentUser, ministry };
@@ -203,42 +180,83 @@ export async function getCurrentUser() {
 
     return currentUser;
   } catch (error) {
-    console.error(error);
+    console.error("Failed to get current user:", error);
     return null;
   }
 }
 
 export async function signOutAccount() {
   try {
-    const session = await account.getSession('current');
-    if (session) {
       const user = await getCurrentUser();
-      if(user) {
+    if(user) {
         await updateUserOnlineStatus(user.$id, false);
-      }
-      await account.deleteSession("current");
+        
+        // 保存用户邮箱到localStorage，用于重新登录时恢复聊天缓存
+        try {
+          localStorage.setItem('last_user_email', user.email);
+        } catch (error) {
+          // 静默处理错误
+        }
     }
+    await account.deleteSession("current");
   } catch (error) {
-    console.error(error);
+    // 静默处理错误
   }
 }
 
-export async function getUserById(userId: string) {
+export async function getUserById(userId: string): Promise<UserDocument | null> {
     try {
       const userDoc = await databases.getDocument(
-        appwriteConfig.databaseId,
+            appwriteConfig.databaseId,
         appwriteConfig.userCollectionId,
         userId
       );
-      if (!userDoc) throw new Error('User not found by direct ID');
-      return userDoc;
+      return userDoc as UserDocument;
     } catch (error) {
       console.error(`Failed to get user by ID ${userId}:`, error);
       return null;
     }
 }
 
-export async function searchUsers(keyword: string, currentUserId: string) {
+export async function getUserWithMinistry(userId: string): Promise<(UserDocument & { ministry?: any }) | null> {
+    try {
+      const userDoc = await databases.getDocument(
+            appwriteConfig.databaseId,
+        appwriteConfig.userCollectionId,
+        userId
+      );
+      
+      const user = userDoc as UserDocument;
+      
+      // 如果用户有事工ID，获取事工信息
+      if (user.ministryId) {
+        try {
+          const ministry = await databases.getDocument(
+            appwriteConfig.databaseId,
+            appwriteConfig.ministryCollectionId,
+            user.ministryId
+          );
+          return { ...user, ministry };
+        } catch (ministryError) {
+          console.error(`Failed to get ministry for user ${userId}:`, ministryError);
+          return user;
+        }
+      }
+      
+      return user;
+    } catch (error) {
+      console.error(`Failed to get user with ministry by ID ${userId}:`, error);
+      return null;
+    }
+}
+
+// 扩展的用户类型，包含关系状态
+export interface UserWithRelationship extends UserDocument {
+  relationshipStatus: 'friend' | 'request_sent' | 'request_received' | 'none';
+  friendRequestId?: string;
+}
+
+export async function searchUsers(keyword: string, currentUserId: string): Promise<UserWithRelationship[]> {
   try {
     const users = await databases.listDocuments(
       appwriteConfig.databaseId,
@@ -248,173 +266,325 @@ export async function searchUsers(keyword: string, currentUserId: string) {
         Query.notEqual('$id', currentUserId)
       ]
     );
-    if (!users) throw new Error('Search failed');
-    return users.documents;
+
+    // 获取当前用户的好友关系
+    const friendships = await databases.listDocuments(
+      appwriteConfig.databaseId,
+      appwriteConfig.friendshipCollectionId,
+      [Query.equal('users', currentUserId)]
+    );
+    const friendIds = new Set(friendships.documents.map(fs => fs.friendId));
+
+    // 获取当前用户发送的好友请求
+    const sentRequests = await databases.listDocuments(
+      appwriteConfig.databaseId,
+      appwriteConfig.friendRequestCollectionId,
+      [
+        Query.equal('senderId', currentUserId),
+        Query.equal('status', 'pending')
+      ]
+    );
+    const sentRequestsMap = new Map(sentRequests.documents.map(req => [req.receiverId, req.$id]));
+
+    // 获取当前用户收到的好友请求
+    const receivedRequests = await databases.listDocuments(
+      appwriteConfig.databaseId,
+      appwriteConfig.friendRequestCollectionId,
+      [
+        Query.equal('receiverId', currentUserId),
+        Query.equal('status', 'pending')
+      ]
+    );
+    const receivedRequestsMap = new Map(receivedRequests.documents.map(req => [req.senderId, req.$id]));
+
+    // 为每个搜索结果添加关系状态
+    const usersWithRelationship: UserWithRelationship[] = users.documents.map(user => {
+      let relationshipStatus: 'friend' | 'request_sent' | 'request_received' | 'none' = 'none';
+      let friendRequestId: string | undefined;
+
+      if (friendIds.has(user.$id)) {
+        relationshipStatus = 'friend';
+      } else if (sentRequestsMap.has(user.$id)) {
+        relationshipStatus = 'request_sent';
+        friendRequestId = sentRequestsMap.get(user.$id);
+      } else if (receivedRequestsMap.has(user.$id)) {
+        relationshipStatus = 'request_received';
+        friendRequestId = receivedRequestsMap.get(user.$id);
+      }
+
+      return {
+        ...(user as UserDocument),
+        relationshipStatus,
+        friendRequestId
+      };
+    });
+
+    return usersWithRelationship;
   } catch (error) {
-    console.error(error);
+    console.error("Search users error:", error);
     return [];
   }
 }
 
+export async function updateUser(userId: string, user: {
+  name?: string;
+  email?: string;
+  imageUrl?: string;
+  ministryId?: string;
+  gender?: string;
+  dateOfFaith?: Date;
+  faithTestimony?: string;
+}) {
+  try {
+    // Build update data, only include fields with values
+    const updateData: any = {};
+    
+    if (user.email !== undefined) updateData.email = user.email;
+    if (user.name !== undefined) updateData.name = user.name;
+    if (user.imageUrl !== undefined) updateData.imageUrl = user.imageUrl;
+    if (user.ministryId !== undefined) updateData.ministryId = user.ministryId;
+    if (user.gender !== undefined) updateData.gender = user.gender;
+    if (user.dateOfFaith !== undefined) updateData.dateOfFaith = user.dateOfFaith;
+    if (user.faithTestimony !== undefined) updateData.faithTestimony = user.faithTestimony;
+    
+    // Ensure at least one field needs updating
+    if (Object.keys(updateData).length === 0) {
+      throw new Error('No fields to update');
+    }
+
+    const updatedUser = await databases.updateDocument(
+      appwriteConfig.databaseId,
+      appwriteConfig.userCollectionId,
+      userId,
+      updateData
+    );
+
+    return updatedUser;
+  } catch (error) {
+    console.error('Update user error:', error);
+    throw error;
+  }
+}
+
+export async function getUserOnlineStatus(userId: string) {
+  try {
+    const user = await databases.getDocument(
+      appwriteConfig.databaseId,
+      appwriteConfig.userCollectionId,
+      userId
+    );
+
+    return {
+      isOnline: user.isOnline || false,
+      lastSeen: user.lastSeen || null,
+    };
+    } catch (error) {
+    console.error('Get user online status error:', error);
+    return {
+      isOnline: false,
+      lastSeen: null,
+    };
+  }
+}
+
+export async function updateUserOnlineStatus(userId: string, isOnline: boolean) {
+  try {
+    // 获取当前用户信息，确保只能更新自己的状态
+    const currentUser = await getCurrentUser();
+    if (!currentUser || currentUser.$id !== userId) {
+      console.warn('Cannot update online status for other users');
+      return;
+    }
+
+    await databases.updateDocument(
+      appwriteConfig.databaseId,
+      appwriteConfig.userCollectionId,
+      userId,
+      { isOnline, lastSeen: new Date().toISOString() }
+    );
+    } catch (error) {
+    console.error(`Failed to update online status for user ${userId}:`, error);
+  }
+}
+
 // =================================================================================================
-// CHAT - The Corrected Implementation
+// CHAT
 // =================================================================================================
 
-/**
- * Gets or creates a chat between two users.
- * This is now more robust and uses two `contains` queries to ensure the correct chat is found.
- */
 export async function getOrCreateChat(user1Id: string, user2Id: string): Promise<ChatDocument> {
   try {
-    console.log('--- API: getOrCreateChat ---');
-    console.log(`[A] Received user IDs: user1=${user1Id}, user2=${user2Id}`);
-
     const chatQuery = [
       Query.contains('participants', user1Id),
       Query.contains('participants', user2Id),
     ];
 
-    console.log(`[B] Executing query to find chat with participants:`, chatQuery);
-
     const existingChats = await databases.listDocuments(
-      appwriteConfig.databaseId,
+            appwriteConfig.databaseId,  
       appwriteConfig.chatCollectionId,
       chatQuery
     );
 
-    // Filter for chats with exactly two participants to be more specific
     const specificChat = existingChats.documents.find(doc => doc.participants.length === 2);
 
     if (specificChat) {
-      console.log(`[C] Found existing specific chat: ${specificChat.$id}`);
       return specificChat as ChatDocument;
     }
-    
-    console.log('[D] No existing chat found. Creating a new one...');
-    
+
     const newChat = await databases.createDocument(
       appwriteConfig.databaseId,
       appwriteConfig.chatCollectionId,
       ID.unique(),
       {
-        participants: [user1Id, user2Id].sort(), // Store sorted for consistency
+        participants: [user1Id, user2Id].sort(),
         lastMessage: '',
         lastMessageTime: new Date().toISOString(),
-      }
+      },
+      [
+        Permission.read(Role.users()),
+        Permission.update(Role.users()),
+      ]
     );
-
-    if (!newChat) {
-      throw new Error("Failed to create chat document.");
-    }
-    
-    console.log(`[E] Successfully created chat document: ${newChat.$id}`);
-
-    const permissions = [
-      Permission.read(Role.user(user1Id)),
-      Permission.read(Role.user(user2Id)),
-      Permission.update(Role.user(user1Id)),
-      Permission.update(Role.user(user2Id)),
-    ];
-
-    const updatedChat = await databases.updateDocument(
-      appwriteConfig.databaseId,
-      appwriteConfig.chatCollectionId,
-      newChat.$id,
-      undefined,
-      permissions
-    );
-    
-    console.log(`[F] Successfully set permissions for chat ${updatedChat.$id}`);
-    return updatedChat as ChatDocument;
-
+    return newChat as ChatDocument;
   } catch (error: any) {
-    console.error('❌ CRITICAL ERROR in getOrCreateChat:', error);
+    console.error('CRITICAL ERROR in getOrCreateChat:', error);
     throw new Error(`Failed to get or create chat: ${error.message}`);
   }
 }
 
-/**
- * Retrieves all chat threads for a given user.
- * This function is now correctly typed and structured.
- */
 export async function getUserChats(userId: string): Promise<UIChat[]> {
   try {
     const response = await databases.listDocuments(
-      appwriteConfig.databaseId,
+          appwriteConfig.databaseId,
       appwriteConfig.chatCollectionId,
       [Query.contains('participants', userId)],
     );
 
-    const chatPromises = response.documents.map(async (chat) => {
-      const otherUserId = chat.participants?.find((id: string) => id !== userId);
-      if (!otherUserId) {
-        console.warn(`Chat ${chat.$id} is missing a participant other than the current user.`);
-        return null;
-      }
+    const chatPromises = response.documents.map(async (chatDoc) => {
+      const chat = chatDoc as ChatDocument;
       
-      const otherUser = await getUserById(otherUserId) as UserDocument;
-      if (!otherUser) {
-        console.warn(`Could not fetch user data for ${otherUserId} in chat ${chat.$id}`);
-        return null;
-      }
+      // 通过参与者数量判断是否为群组聊天
+      const isGroupChat = chat.participants?.length > 2;
       
-      return {
-        ...chat,
-        otherUser,
-      } as UIChat;
-    });
-    
-    const chats = (await Promise.all(chatPromises)).filter(Boolean); // Filter out nulls
-    
-    // Sort by most recent message
-    chats.sort((a, b) => {
-      const timeA = a.lastMessageTime ? new Date(a.lastMessageTime).getTime() : new Date(a.$createdAt).getTime();
-      const timeB = b.lastMessageTime ? new Date(b.lastMessageTime).getTime() : new Date(b.$createdAt).getTime();
-      return timeB - timeA;
-    });
-
-    return chats as UIChat[];
-  } catch (error) {
-    console.error("Failed to get user chats:", error);
-    return [];
-  }
-}
-
-export async function sendMessage(chatId: string, senderId: string, content: string, type: string = 'text', fileData?: any) {
-  try {
-    const newMessage = await databases.createDocument(
-      appwriteConfig.databaseId,
-      appwriteConfig.messageCollectionId,
-      ID.unique(),
-      {
-        chatId,
-        sender: senderId,
-        content,
-        messageType: type,
-        fileData: fileData ? JSON.stringify(fileData) : undefined,
-      },
-      [
-          Permission.read(Role.user(senderId)),
-          // The other participant's read permission is added via a server function or trigger
-      ]
-    );
-
-    await databases.updateDocument(
-        appwriteConfig.databaseId,
-        appwriteConfig.chatCollectionId,
-        chatId,
-        {
-            lastMessage: type === 'file' ? `Attachment: ${content}` : content,
-            lastMessageTime: new Date().toISOString()
+      if (isGroupChat) {
+        // 群组聊天 - 尝试从系统消息中获取群组元数据
+        let groupName = `群聊(${chat.participants?.length || 0})`;
+        let groupAvatar = null;
+        let admins: string[] = [];
+        let createdBy = '';
+        
+        try {
+          // 获取群组创建的系统消息
+          const systemMessages = await databases.listDocuments(
+            appwriteConfig.databaseId,
+            appwriteConfig.messageCollectionId,
+            [
+              Query.equal('chatId', chat.$id),
+              Query.equal('messageType', 'system_group_created'),
+              Query.limit(1)
+            ]
+          );
+          
+          if (systemMessages.documents.length > 0) {
+            const systemMessage = systemMessages.documents[0];
+            try {
+              const metadata = JSON.parse(systemMessage.content);
+              groupName = metadata.groupName || groupName;
+              groupAvatar = metadata.avatar;
+              admins = metadata.admins || [];
+              createdBy = metadata.createdBy || '';
+            } catch (e) {
+              // 解析失败，使用默认值
+            }
+          }
+        } catch (e) {
+          // 获取系统消息失败，使用默认值
         }
-    );
+        
+        return {
+          ...chat,
+          otherUser: null, // 群组聊天没有otherUser
+          isGroup: true,
+          name: groupName,
+          avatar: groupAvatar,
+          admins,
+          createdBy,
+        };
+      } else {
+        // 一对一聊天
+        const otherUserId = chat.participants?.find((id: string) => id !== userId);
+        if (!otherUserId) return null;
 
-    return newMessage;
-  } catch (error) {
-    console.error("Failed to send message:", error);
-    throw error;
-  }
+        const otherUser = await getUserById(otherUserId);
+        if (!otherUser) return null;
+
+        return {
+          ...chat,
+          otherUser,
+          isGroup: false,
+        };
+      }
+    });
+
+    const chats = (await Promise.all(chatPromises)).filter(Boolean) as UIChat[];
+
+    chats.sort((a, b) => new Date(b.lastMessageTime!).getTime() - new Date(a.lastMessageTime!).getTime());
+
+    return chats;
+    } catch (error) {
+    return [];
+    }
 }
+
+export async function sendMessage(chatId: string, senderId: string, receiverId: string, content: string, type: string = 'text', fileData?: any) {
+    try {
+        // Validation to prevent corrupted messages
+        if (!content || content.trim() === '') {
+            throw new Error('Message content cannot be empty');
+        }
+        if (content === 'text' || content === type) {
+            console.error('⚠️ Potential parameter mismatch detected!', { chatId, senderId, receiverId, content, type });
+            throw new Error('Invalid message content - possible parameter order issue');
+        }
+
+        console.log('📤 Sending message:', { chatId, senderId, receiverId, content: content.substring(0, 50), type });
+
+        // 消息本身不需要设置过期时间戳，清理时会根据创建时间和聊天设置来判断
+        const newMessage = await databases.createDocument(
+            appwriteConfig.databaseId,
+            appwriteConfig.messageCollectionId,
+            ID.unique(),
+            {
+                chatId,
+                sender: senderId,
+                content,
+                messageType: type,
+                fileData: fileData ? JSON.stringify(fileData) : undefined,
+                // 移除 expirationTimestamp 字段，改为在清理时动态计算
+            },
+            [
+                Permission.read(Role.users()),
+                Permission.update(Role.users()),
+                Permission.delete(Role.users()),
+            ]
+        );
+
+        await databases.updateDocument(
+            appwriteConfig.databaseId,
+            appwriteConfig.chatCollectionId,
+            chatId,
+            {
+                lastMessage: type === 'file' ? `Attachment: ${content}` : content,
+                lastMessageTime: new Date().toISOString()
+            }
+        );
+
+        return newMessage;
+    } catch (error) {
+        console.error("Failed to send message:", error);
+        throw error; 
+    }
+}
+
 
 export async function getChatMessages(chatId: string, limit: number = 50) {
     try {
@@ -427,7 +597,7 @@ export async function getChatMessages(chatId: string, limit: number = 50) {
                 Query.limit(limit)
             ]
         );
-        return response.documents;
+        return response.documents.reverse(); // reverse to show oldest first
     } catch (error) {
         console.error("Failed to get chat messages:", error);
         return [];
@@ -441,15 +611,15 @@ export async function deleteMessage(messageId: string) {
             appwriteConfig.messageCollectionId,
             messageId
         );
+        return { status: 'ok' };
     } catch (error) {
         console.error("Failed to delete message:", error);
         throw error;
     }
 }
 
-
 // =================================================================================================
-// CHAT DEBUGGING AND REPAIR FUNCTIONS - All Corrected
+// CHAT DEBUGGING AND REPAIR FUNCTIONS
 // =================================================================================================
 
 export async function recreateMissingChats(userId: string) {
@@ -559,7 +729,7 @@ export async function advancedChatDiagnosis(userId: string): Promise<any> {
       localCache: { count: localChats.length, chats: localChats },
       issues,
     };
-  } catch (error: any) {
+    } catch (error: any) {
     return { success: false, error: error.message };
   }
 }
@@ -605,9 +775,293 @@ export async function fixChatDataSync(userId: string): Promise<any> {
   }
 }
 
-// Dummy placeholder for any other functions that were in the file
-export async function placeholder() {
-    return true;
+// =================================================================================================
+// FRIEND SYSTEM
+// =================================================================================================
+
+export async function getFriendRequests(userId: string) {
+  try {
+    const response = await databases.listDocuments(
+      appwriteConfig.databaseId,
+      appwriteConfig.friendRequestCollectionId,
+      [
+        Query.equal('receiverId', userId),
+        Query.equal('status', 'pending'),
+      ]
+    );
+
+    const requestsWithSender = await Promise.all(
+      response.documents.map(async (request) => {
+        const sender = await getUserById(request.senderId);
+        return { ...request, sender };
+      })
+    );
+
+    return requestsWithSender;
+  } catch (error) {
+    console.error('Get friend requests error:', error);
+    return [];
+  }
+}
+
+export async function sendFriendRequest(senderId: string, receiverId: string) {
+  try {
+    // 检查是否已经是好友
+    const existingFriendship = await databases.listDocuments(
+      appwriteConfig.databaseId,
+      appwriteConfig.friendshipCollectionId,
+      [
+        Query.equal('users', senderId),
+        Query.equal('friendId', receiverId)
+      ]
+    );
+    if (existingFriendship.total > 0) throw new Error("Already friends");
+
+    // 检查是否已经存在待处理的好友请求（双向检查）
+    const existingRequest1 = await databases.listDocuments(
+      appwriteConfig.databaseId,
+      appwriteConfig.friendRequestCollectionId,
+      [
+        Query.equal('senderId', senderId),
+        Query.equal('receiverId', receiverId),
+        Query.equal('status', 'pending')
+      ]
+    );
+
+    const existingRequest2 = await databases.listDocuments(
+      appwriteConfig.databaseId,
+      appwriteConfig.friendRequestCollectionId,
+      [
+        Query.equal('senderId', receiverId),
+        Query.equal('receiverId', senderId),
+        Query.equal('status', 'pending')
+      ]
+    );
+
+    if (existingRequest1.total > 0 || existingRequest2.total > 0) {
+      throw new Error("Friend request already sent or received");
+    }
+
+    const friendRequest = await databases.createDocument(
+      appwriteConfig.databaseId,
+      appwriteConfig.friendRequestCollectionId,
+      ID.unique(),
+      { senderId, receiverId, status: 'pending' }
+    );
+
+    return friendRequest;
+  } catch (error) {
+    console.error('Send friend request error:', error);
+    throw error;
+  }
+}
+
+export async function handleFriendRequest(requestId: string, senderId: string, receiverId: string, status: 'accepted' | 'rejected') {
+  try {
+    await databases.updateDocument(
+      appwriteConfig.databaseId,
+      appwriteConfig.friendRequestCollectionId,
+      requestId,
+      { status }
+    );
+
+    if (status === 'accepted') {
+      const currentTimestamp = new Date().toISOString();
+      
+      // Create friendship from sender's perspective
+      await databases.createDocument(
+        appwriteConfig.databaseId,
+        appwriteConfig.friendshipCollectionId,
+        ID.unique(),
+        { 
+          users: senderId, 
+          friendId: receiverId,
+          status: 'active',
+          createAt: currentTimestamp
+        }
+      );
+
+      // Create friendship from receiver's perspective
+      await databases.createDocument(
+        appwriteConfig.databaseId,
+        appwriteConfig.friendshipCollectionId,
+        ID.unique(),
+        { 
+          users: receiverId, 
+          friendId: senderId,
+          status: 'active',
+          createAt: currentTimestamp
+        }
+      );
+    }
+    return { success: true };
+  } catch (error) {
+    console.error('Handle friend request error:', error);
+    throw error;
+  }
+}
+
+export async function getFriends(userId: string): Promise<UserDocument[]> {
+  try {
+    const friendships = await databases.listDocuments(
+      appwriteConfig.databaseId,
+      appwriteConfig.friendshipCollectionId,
+      [Query.equal('users', userId)]
+    );
+
+    // Extract friend IDs from the friendship documents
+    const friendIds = friendships.documents
+      .map(fs => fs.friendId)
+      .filter(Boolean);
+
+    if (friendIds.length === 0) return [];
+
+    const friends = await databases.listDocuments(
+      appwriteConfig.databaseId,
+      appwriteConfig.userCollectionId,
+      [Query.equal('$id', friendIds)]
+    );
+
+    return friends.documents as UserDocument[];
+  } catch (error) {
+    console.error('Get friends error:', error);
+    return [];
+  }
+}
+
+export async function removeFriend(friendshipId: string) {
+  try {
+    await databases.deleteDocument(
+      appwriteConfig.databaseId,
+      appwriteConfig.friendshipCollectionId,
+      friendshipId
+    );
+
+    return { success: true };
+  } catch (error) {
+    console.error('Remove friend error:', error);
+    throw error;
+  }
+}
+
+// ============================================================
+// MINISTRY & NOTIFICATIONS & OTHER
+// ============================================================
+
+export async function getMinistryById(ministryId: string) {
+  try {
+    const ministry = await databases.getDocument(
+      appwriteConfig.databaseId,
+      appwriteConfig.ministryCollectionId,
+        ministryId
+    );
+    return ministry;
+  } catch (error) {
+    console.log(error);
+  }
+}
+
+export async function initializeDefaultMinistry() {
+    try {
+        const ministryList = await databases.listDocuments(appwriteConfig.databaseId, appwriteConfig.ministryCollectionId, [Query.limit(1)]);
+        if (ministryList.documents.length > 0) {
+            return ministryList.documents[0];
+    } else {
+            return await databases.createDocument(appwriteConfig.databaseId, appwriteConfig.ministryCollectionId, ID.unique(), { name: "Default Ministry" });
+        }
+  } catch (error) {
+        console.error("Failed to initialize default ministry", error);
+  return null;
+}
+}
+
+export async function uploadFile(file: File) {
+    try {
+        const uploadedFile = await storage.createFile(
+            appwriteConfig.storageId,
+            ID.unique(),
+            file
+        );
+        return uploadedFile;
+  } catch (error) {
+        console.log(error);
+    throw error;
+  }
+}
+
+export async function uploadVoiceMessage(audioBlob: Blob, fileName?: string): Promise<string> {
+    try {
+        // Convert blob to file
+        const file = new File([audioBlob], fileName || `voice_${Date.now()}.webm`, {
+            type: 'audio/webm',
+        });
+
+        const uploadedFile = await storage.createFile(
+            appwriteConfig.storageId,
+            ID.unique(),
+            file
+        );
+
+        console.log('✅ Voice message uploaded:', uploadedFile.$id);
+        return uploadedFile.$id;
+    } catch (error) {
+        console.error('Error uploading voice message:', error);
+        throw new Error('Failed to upload voice message');
+    }
+}
+
+export function getFilePreview(fileId: string) {
+    try {
+        const fileUrl = storage.getFileView(
+            appwriteConfig.storageId,
+            fileId
+        );
+        if (!fileUrl) throw Error;
+        return fileUrl;
+  } catch (error) {
+        console.log(error);
+    throw error;
+  }
+}
+
+export async function deleteFile(fileId: string) {
+    try {
+        await storage.deleteFile(appwriteConfig.storageId, fileId);
+        return { status: "ok" };
+  } catch (error) {
+        console.log(error);
+    }
+}
+
+export function getUserAvatarUrl(imageUrl: string | null | undefined): string {
+    try {
+        if (!imageUrl) {
+            return '/assets/icons/profile-placeholder.svg';
+        }
+        
+        if (imageUrl.startsWith('http://') || imageUrl.startsWith('https://')) {
+            return imageUrl;
+        }
+        
+        if (imageUrl.startsWith('/')) {
+            return imageUrl;
+        }
+        
+        // Handle case where imageUrl is a file ID from Appwrite Storage
+        if (imageUrl.length > 10 && !imageUrl.includes('/')) {
+            const fileUrl = storage.getFileView(
+                appwriteConfig.storageId,
+                imageUrl
+            );
+            return fileUrl.toString();
+        }
+        
+        return imageUrl;
+        
+    } catch (error) {
+        console.error("Failed to get user avatar URL:", error);
+        return '/assets/icons/profile-placeholder.svg';
+    }
 }
 
 // =================================================================================================
@@ -668,103 +1122,39 @@ export async function createPost(post: {
     }
 }
 
-export async function createPostComment(post: INewPost) {
+export async function deletePost(postId: string, imageId: string) {
+    if(!postId || !imageId) throw Error;
+    
     try {
-        const uploaderFile = await uploadFile(post.file[0]);
-
-        if(!uploaderFile) throw Error;
-
-        const fileUrl = getFilePreview(uploaderFile.$id);
-
-        if(!fileUrl) {
-            await deleteFile(uploaderFile.$id);
-            throw Error;
-        }
-
-        const tags = post.tags?.replace(/ /g, '').split(',') || [];
-
-        const newPost = await databases.createDocument(
+        // Delete the post document
+        await databases.deleteDocument(
             appwriteConfig.databaseId,
             appwriteConfig.postCollectionId,
-            ID.unique(),
-            {
-                creator: post.userId,
-                caption: post.caption,
-                imageUrl: fileUrl,
-                imageId: uploaderFile.$id,
-                location: post.location,
-                tags: tags
-            }
+            postId
         );
-
-        if(!newPost) {
-            await deleteFile(uploaderFile.$id);
-            throw Error;
-        }
-
-        return newPost;
-    } catch (error) {
-        console.log(error);
-    }
-}
-
-export function getFilePreview(fileId: string): string {
-    try {
-        const fileUrl = storage.getFileView(
-            appwriteConfig.storageId,
-            fileId
-        );
-        return fileUrl.toString();
-    } catch (error) {
-        console.log("Error getting file preview:", error);
-        throw error;
-    }
-}
-
-export async function uploadFile(file: File) {
-    try {
-        const uploadedFile = await storage.createFile(
-            appwriteConfig.storageId,
-            ID.unique(),
-            file,
-            [
-                Permission.read(Role.users()),
-                Permission.update(Role.users()),
-                Permission.delete(Role.users())
-            ]
-        );
-
-        return uploadedFile;
+        
+        // Delete the associated image file
+        await storage.deleteFile(appwriteConfig.storageId, imageId);
+        
+        return { status: 'ok' };
     } catch (error) {
         console.log(error);
         throw error;
-    }
-}
-
-export async function deleteFile(fileId: string) {
-    try {
-        await storage.deleteFile(appwriteConfig.storageId, fileId);
-    
-        return {status: 'ok'};
-    } catch (error) {
-        console.log(error);
     }
 }
 
 export async function getRecentPosts() {
-    try{
+    try {
         const posts = await databases.listDocuments(
             appwriteConfig.databaseId,  
             appwriteConfig.postCollectionId,
             [Query.orderDesc('$createdAt'), Query.limit(20)]
-    );
+        );
         return posts.documents;
-    }    catch (error) {
+    } catch (error) {
         console.error('Error fetching recent posts:', error);
         throw error;
     }
-    
-    
 }
 
 export async function likePost(postId: string, likesArray: string[]) {
@@ -776,13 +1166,14 @@ export async function likePost(postId: string, likesArray: string[]) {
             {
                 likes: likesArray
             }
-        )
+        );
 
         if(!updatePost) throw Error;
 
-        return updatePost
+        return updatePost;
     } catch (error) {
         console.log(error);
+        throw error;
     }
 }
 
@@ -796,13 +1187,14 @@ export async function savePost(postId: string, userId: string) {
                 user: userId,
                 post: postId,
             }
-        )
+        );
 
         if(!updatedPost) throw Error;
 
-        return updatedPost
+        return updatedPost;
     } catch (error) {
         console.log(error);
+        throw error;
     }
 }
 
@@ -812,17 +1204,18 @@ export async function deleteSavedPost(savedRecordId: string) {
             appwriteConfig.databaseId,
             appwriteConfig.savesCollectionId,
             savedRecordId,
-        )
+        );
 
         if(!statusCode) throw Error;
 
-        return {status: 'ok'}
+        return {status: 'ok'};
     } catch (error) {
         console.log(error);
+        throw error;
     }
 }
 
-export async function getPostById(postId: string): Promise<Models.Document | null> {
+export async function getPostById(postId: string) {
     try {
         const post = await databases.getDocument(
             appwriteConfig.databaseId,
@@ -832,20 +1225,24 @@ export async function getPostById(postId: string): Promise<Models.Document | nul
         return post;
     } catch (error) {
         console.log("Error in getPostById:", error);
-        // Depending on requirements, you might want to return null or rethrow
-        // For now, rethrowing to make it explicit that an error occurred.
-        // If you want to handle "not found" gracefully, you might check error.code
         throw error; 
     }
 }
 
-export async function updatePost(post: IUpdatePost): Promise<Models.Document> {
+export async function updatePost(post: {
+    postId: string;
+    caption: string;
+    imageUrl: string;
+    imageId: string;
+    location: string;
+    tags: string;
+    file: File[];
+}) {
     const hasFileToUpdate = post.file.length > 0;
-    let uploadedFileData: Models.File | undefined = undefined;
+    let uploadedFileData: any = undefined;
 
     try {
         if (hasFileToUpdate) {
-            // Upload new file to storage
             uploadedFileData = await uploadFile(post.file[0]);
             if (!uploadedFileData) throw Error;
         }
@@ -865,18 +1262,13 @@ export async function updatePost(post: IUpdatePost): Promise<Models.Document> {
             }
         );
 
-        // Failed to update
         if (!updatedPost) {
-            // Delete new file that has been recently uploaded
             if (uploadedFileData) {
                 await deleteFile(uploadedFileData.$id);
             }
-
-            // If no new file uploaded, just throw error
             throw Error;
         }
 
-        // Safely delete old file after successful update
         if (hasFileToUpdate && post.imageId) {
             await deleteFile(post.imageId);
         }
@@ -888,21 +1280,6 @@ export async function updatePost(post: IUpdatePost): Promise<Models.Document> {
         }
         console.log(error);
         throw error;
-    }
-}
-
-export async function deletePost(postId: string, imageId: string) {
-    if(!postId || !imageId) throw Error;
-    try {
-        await databases.deleteDocument(
-            appwriteConfig.databaseId,
-            appwriteConfig.postCollectionId,
-            postId
-        )
-        
-        return {status: 'ok'};
-    } catch (error) {
-        console.log(error);
     }
 }
 
@@ -946,556 +1323,11 @@ export async function searchPosts(searchTerm: string) {
     }
 }
 
-// 事工管理API
-export async function getMinistries() {
-  try {
-    const ministries = await databases.listDocuments(
-      appwriteConfig.databaseId,
-      appwriteConfig.ministryCollectionId
-    );
-    return ministries.documents;
-  } catch (error) {
-    console.error(error);
-  }
-}
+// =================================================================================================
+// NOTIFICATIONS
+// =================================================================================================
 
-export async function getMinistryById(ministryId: string) {
-  try {
-    const ministry = await databases.getDocument(
-      appwriteConfig.databaseId,
-      appwriteConfig.ministryCollectionId,
-      ministryId
-    );
-    return ministry;
-  } catch (error) {
-    console.log(error);
-  }
-}
-
-export async function createMinistry(name: string) {
-  try {
-    const newMinistry = await databases.createDocument(
-      appwriteConfig.databaseId,
-      appwriteConfig.ministryCollectionId,
-      ID.unique(),
-      { name }
-    );
-    return newMinistry;
-  } catch (error) {
-    console.error('创建事工失败:', error);
-    throw error;
-  }
-}
-
-export async function updateMinistry(id: string, name: string) {
-  try {
-    const res = await databases.updateDocument(
-      appwriteConfig.databaseId,
-      appwriteConfig.ministryCollectionId,
-      id,
-      { name }
-    );
-    return res;
-  } catch (error) {
-    console.error('更新事工失败:', error);
-    throw error;
-  }
-}
-
-export async function deleteMinistry(id: string) {
-  try {
-    await databases.deleteDocument(
-      appwriteConfig.databaseId,
-      appwriteConfig.ministryCollectionId,
-      id
-    );
-    return true;
-  } catch (error) {
-    console.error('删除事工失败:', error);
-    throw error;
-  }
-}
-
-// 用户管理API
-export async function getUsers() {
-  try {
-    const res = await databases.listDocuments(
-      appwriteConfig.databaseId,
-      appwriteConfig.userCollectionId
-    );
-    return res.documents;
-  } catch (error) {
-    console.error('获取用户列表失败:', error);
-    throw error;
-  }
-}
-
-export async function createUserByAdmin(user: INewUser) {
-    try {
-        // 创建 Appwrite 账户
-        const newAccount = await account.create(
-            ID.unique(),
-            user.email,
-            user.password,
-            user.name
-        );
-
-        if (!newAccount) throw Error;
-
-        // 创建默认头像
-        const avatarUrl = avatars.getInitials(user.name).toString();
-
-        // 保存用户信息到数据库
-        const newUser = await saveUserToDB({
-            accountId: newAccount.$id,
-            name: newAccount.name,
-            email: newAccount.email,
-            ministryId: user.ministryId,
-            imageUrl: avatarUrl,
-            initialPassword: user.password // 使用创建账户时的密码作为初始密码
-        });
-
-        if(!newUser) {
-            await account.deleteSession('current');  // 如果保存失败，清理会话
-            throw Error('Failed to save user to database');
-        }
-
-        return newAccount;
-    } catch (error: any) {
-        console.error("createUserByAdmin error:", error);
-        if (error.code === 409) {
-            throw new Error("邮箱已注册");
-        }
-        throw error;
-    }
-}
-
-export async function updateUser(userId: string, user: IUpdateUser) {
-  try {
-    // 构建更新数据，只包含有值的字段
-    const updateData: any = {};
-    
-    if (user.email !== undefined) updateData.email = user.email;
-    if (user.name !== undefined) updateData.name = user.name;
-    if (user.imageUrl !== undefined) updateData.imageUrl = user.imageUrl;
-    if (user.ministryId !== undefined) updateData.ministryId = user.ministryId;
-    if (user.gender !== undefined) updateData.gender = user.gender;
-    if (user.dateOfFaith !== undefined) updateData.dateOfFaith = user.dateOfFaith;
-    if (user.faithTestimony !== undefined) updateData.faithTestimony = user.faithTestimony;
-    
-    // 确保至少有一个字段需要更新
-    if (Object.keys(updateData).length === 0) {
-      throw new Error('没有字段需要更新');
-    }
-
-    console.log('Updating user with data:', updateData);
-
-    const updatedUser = await databases.updateDocument(
-      appwriteConfig.databaseId,
-      appwriteConfig.userCollectionId,
-      userId,
-      updateData
-    );
-
-    if (!updatedUser) {
-      throw new Error('更新用户失败');
-    }
-
-    return updatedUser;
-  } catch (error) {
-    console.error('更新用户失败:', error);
-    throw error;
-  }
-}
-
-export async function resetUserPassword(userId: string) {
-    try {
-        const user = await databases.getDocument(
-            appwriteConfig.databaseId,
-            appwriteConfig.userCollectionId,
-            userId
-        );
-
-        if (!user) {
-            throw new Error('用户不存在');
-        }
-
-        // 重置为初始密码
-        await account.updatePassword(user.accountId, user.initialPassword);
-
-        return true;
-    } catch (error) {
-        console.error('Reset password error:', error);
-        throw error;
-    }
-}
-
-export async function getUserOnlineStatus(userId: string) {
-  try {
-    const user = await databases.getDocument(
-      appwriteConfig.databaseId,
-      appwriteConfig.userCollectionId,
-      userId
-    );
-
-    return {
-      isOnline: user.isOnline || false,
-      lastSeen: user.lastSeen || null,
-    };
-  } catch (error) {
-    console.error('Get user online status error:', error);
-    return {
-      isOnline: false,
-      lastSeen: null,
-    };
-  }
-}
-
-export async function updateUserOnlineStatus(userId: string, isOnline: boolean) {
-  console.log(`[STATUS_UPDATE] Attempting to set user ${userId} to isOnline: ${isOnline}`);
-  try {
-    await databases.updateDocument(
-      appwriteConfig.databaseId,
-      appwriteConfig.userCollectionId,
-      userId,
-      {
-        isOnline: isOnline,
-        lastSeen: new Date().toISOString(),
-      }
-    );
-    console.log(`[STATUS_UPDATE] SUCCESS for user ${userId}`);
-  } catch (error) {
-    console.error(`[STATUS_UPDATE] FAILED for user ${userId}:`, error);
-  }
-}
-
-// Friend System API
-export async function getFriendRequests(userId: string) {
-  try {
-    console.log('🔍 开始获取好友请求，userId:', userId);
-    
-    const response = await databases.listDocuments(
-      appwriteConfig.databaseId,
-      appwriteConfig.friendRequestCollectionId,
-      [
-        Query.equal('receiverId', userId),
-        Query.equal('status', 'pending'),
-        Query.orderDesc('$createdAt'),
-      ]
-    );
-
-    console.log('📋 获取到的好友请求原始数据:', response.documents);
-
-    // 获取所有事工信息，用于映射事工名称
-    let ministries: any[] = [];
-    try {
-      const ministriesResponse = await databases.listDocuments(
-        appwriteConfig.databaseId,
-        appwriteConfig.ministryCollectionId,
-        []
-      );
-      ministries = ministriesResponse.documents;
-      console.log('📋 获取到的事工信息:', ministries);
-    } catch (error) {
-      console.error('Failed to fetch ministries for friend requests:', error);
-    }
-
-    // 获取发送者的详细信息
-    const requestsWithSender = await Promise.all(
-      response.documents.map(async (request) => {
-        try {
-          const sender = await databases.getDocument(
-            appwriteConfig.databaseId,
-            appwriteConfig.userCollectionId,
-            request.senderId
-          );
-
-          // 根据 ministryId 查找对应的事工名称
-          const userMinistry = ministries.find(ministry => ministry.$id === sender.ministryId);
-
-          console.log('📋 发送者详细信息:', {
-            senderId: sender.$id,
-            senderName: sender.name,
-            gender: sender.gender,
-            ministryId: sender.ministryId,
-            ministry: userMinistry?.name,
-            dateOfFaith: sender.dateOfFaith,
-            faithTestimony: sender.faithTestimony,
-            interests: sender.interests,
-            allFields: Object.keys(sender)
-          });
-
-          return {
-            ...request,
-            sender: {
-              $id: sender.$id,
-              id: sender.$id,
-              name: sender.name,
-              email: sender.email,
-              imageUrl: sender.imageUrl,
-              gender: sender.gender,
-              dateOfFaith: sender.dateOfFaith,
-              faithTestimony: sender.faithTestimony,
-              interests: sender.interests || [],
-              ministry: userMinistry ? userMinistry.name : null,
-              ministryId: sender.ministryId,
-              accountId: sender.accountId,
-              status: sender.status,
-              username: sender.username || sender.name,
-              mustChangePassword: sender.mustChangePassword || false,
-              isOnline: sender.isOnline || false,
-              lastSeen: sender.lastSeen
-            },
-          };
-        } catch (error) {
-          console.error(`Failed to fetch sender info for request ${request.$id}:`, error);
-          return {
-            ...request,
-            sender: {
-              $id: request.senderId,
-              id: request.senderId,
-              name: '未知用户',
-              email: '',
-              imageUrl: null,
-              gender: null,
-              dateOfFaith: null,
-              faithTestimony: null,
-              interests: [],
-              ministry: null,
-              ministryId: null,
-              accountId: '',
-              status: 'active'
-            }
-          };
-        }
-      })
-    );
-
-    console.log('✅ 完整的好友请求数据:', requestsWithSender);
-    return requestsWithSender;
-  } catch (error) {
-    console.error('Get friend requests error:', error);
-    return [];
-  }
-}
-
-export async function sendFriendRequest(senderId: string, receiverId: string, message?: string) {
-  try {
-    // 检查是否已经是好友
-    const existingFriendship = await databases.listDocuments(
-      appwriteConfig.databaseId,
-      appwriteConfig.friendRequestCollectionId,
-      [
-        Query.equal('senderId', [senderId, receiverId]),
-        Query.equal('receiverId', [receiverId, senderId]),
-        Query.equal('status', ['pending', 'accepted']),
-      ]
-    );
-
-    if (existingFriendship.documents.length > 0) {
-      throw new Error('Friend request already exists or users are already friends');
-    }
-
-    // 创建好友请求
-    const friendRequest = await databases.createDocument(
-      appwriteConfig.databaseId,
-      appwriteConfig.friendRequestCollectionId,
-      ID.unique(),
-      {
-        senderId,
-        receiverId,
-        status: 'pending',
-        message,
-      },
-      [
-        Permission.read(Role.users()),
-        Permission.update(Role.users()),
-        Permission.delete(Role.users())
-      ]
-    );
-
-    return friendRequest;
-  } catch (error) {
-    console.error('Send friend request error:', error);
-    throw error;
-  }
-}
-
-export async function handleFriendRequest(requestId: string, status: 'accepted' | 'rejected', userId: string) {
-  try {
-    // 首先获取现有的好友请求记录
-    const existingRequest = await databases.getDocument(
-      appwriteConfig.databaseId,
-      appwriteConfig.friendRequestCollectionId,
-      requestId
-    );
-
-    // 直接删除好友请求记录（不管接受还是拒绝）
-    await databases.deleteDocument(
-      appwriteConfig.databaseId,
-      appwriteConfig.friendRequestCollectionId,
-      requestId
-    );
-
-    if (status === 'accepted') {
-      // 只有接受时才创建好友关系
-      const currentTime = new Date().toISOString();
-      
-      await databases.createDocument(
-        appwriteConfig.databaseId,
-        appwriteConfig.friendshipCollectionId,
-        ID.unique(),
-        {
-          userId: existingRequest.senderId,
-          friendId: existingRequest.receiverId,
-          status: 'active',
-          createAt: currentTime,
-        },
-        [
-          Permission.read(Role.users()),
-          Permission.update(Role.users()),
-          Permission.delete(Role.users())
-        ]
-      );
-
-      await databases.createDocument(
-        appwriteConfig.databaseId,
-        appwriteConfig.friendshipCollectionId,
-        ID.unique(),
-        {
-          userId: existingRequest.receiverId,
-          friendId: existingRequest.senderId,
-          status: 'active',
-          createAt: currentTime,
-        },
-        [
-          Permission.read(Role.users()),
-          Permission.update(Role.users()),
-          Permission.delete(Role.users())
-        ]
-      );
-    }
-
-    return { success: true, status };
-  } catch (error) {
-    console.error('Handle friend request error:', error);
-    throw error;
-  }
-}
-
-export async function getFriends(userId: string) {
-  try {
-    if (!appwriteConfig.friendshipCollectionId || !appwriteConfig.userCollectionId) {
-      console.error('Missing collection IDs in configuration');
-      return [];
-    }
-
-    console.log('🔍 开始获取好友列表，userId:', userId);
-    console.log('Fetching friendships with config:', {
-      databaseId: appwriteConfig.databaseId,
-      friendshipCollectionId: appwriteConfig.friendshipCollectionId,
-      userCollectionId: appwriteConfig.userCollectionId
-    });
-
-    // 首先获取好友关系记录
-    const friendships = await databases.listDocuments(
-      appwriteConfig.databaseId,
-      appwriteConfig.friendshipCollectionId,
-      [Query.equal('userId', userId)]
-    );
-
-    console.log('📋 获取到的好友关系:', friendships);
-
-    if (!friendships.documents.length) {
-      return [];
-    }
-
-    // 获取所有好友的用户信息
-    const friendIds = friendships.documents.map(fs => fs.friendId);
-    console.log('📋 好友ID列表:', friendIds);
-
-    const friends = await databases.listDocuments(
-      appwriteConfig.databaseId,
-      appwriteConfig.userCollectionId,
-      [Query.equal('$id', friendIds)]
-    );
-
-    console.log('📋 获取到的好友用户信息:', friends);
-
-    // 获取所有事工信息，用于映射事工名称
-    let ministries: any[] = [];
-    try {
-      const ministriesResponse = await databases.listDocuments(
-        appwriteConfig.databaseId,
-        appwriteConfig.ministryCollectionId,
-        []
-      );
-      ministries = ministriesResponse.documents;
-    } catch (error) {
-      console.error('Failed to fetch ministries for friends:', error);
-    }
-
-    // 将好友关系ID添加到用户信息中
-    const result = friends.documents.map(friend => {
-      // 根据 ministryId 查找对应的事工名称
-      const userMinistry = ministries.find(ministry => ministry.$id === friend.ministryId);
-      const ministryName = userMinistry ? userMinistry.name : null;
-
-      return {
-        ...friend,
-        $id: friend.$id,
-        id: friend.$id,
-        email: friend.email,
-        name: friend.name,
-        username: friend.username,
-        imageUrl: friend.imageUrl,
-        gender: friend.gender,
-        dateOfFaith: friend.dateOfFaith,
-        faithTestimony: friend.faithTestimony,
-        ministry: ministryName, // 使用事工名称而不是ID
-        ministryId: friend.ministryId,
-        accountId: friend.accountId,
-        status: friend.status,
-        mustChangePassword: friend.mustChangePassword,
-        isOnline: friend.isOnline,
-        lastSeen: friend.lastSeen,
-        friendshipId: friendships.documents.find(fs => fs.friendId === friend.$id)?.$id
-      };
-    }) as IUserWithFriendship[];
-
-    console.log('✅ 完整的好友列表数据:', result);
-    return result;
-  } catch (error) {
-    console.error('Get friends error:', error);
-    // 添加更详细的错误日志
-    if (error instanceof Error) {
-      console.error('Error details:', {
-        message: error.message,
-        stack: error.stack,
-        name: error.name
-      });
-    }
-    return [];
-  }
-}
-
-export async function removeFriend(friendshipId: string) {
-  try {
-    await databases.deleteDocument(
-      appwriteConfig.databaseId,
-      appwriteConfig.friendshipCollectionId,
-      friendshipId
-    );
-
-    return { success: true };
-  } catch (error) {
-    console.error('Remove friend error:', error);
-    throw error;
-  }
-}
-
-// 获取用户通知
-export async function getUserNotifications(userId: string): Promise<INotification[]> {
+export async function getUserNotifications(userId: string) {
   try {
     const notifications = await databases.listDocuments(
       appwriteConfig.databaseId,
@@ -1511,7 +1343,7 @@ export async function getUserNotifications(userId: string): Promise<INotificatio
       $id: doc.$id,
       $createdAt: doc.$createdAt,
       userId: doc.userId,
-      type: doc.type as INotification['type'],
+      type: doc.type,
       title: doc.title,
       message: doc.message,
       isRead: doc.isRead,
@@ -1523,7 +1355,6 @@ export async function getUserNotifications(userId: string): Promise<INotificatio
   }
 }
 
-// 标记单个通知为已读
 export async function markUserNotificationAsRead(notificationId: string) {
   try {
     const updatedNotification = await databases.updateDocument(
@@ -1541,7 +1372,6 @@ export async function markUserNotificationAsRead(notificationId: string) {
   }
 }
 
-// 标记所有通知为已读
 export async function markAllUserNotificationsAsRead(userId: string) {
   try {
     const notifications = await getUserNotifications(userId);
@@ -1558,1151 +1388,6 @@ export async function markAllUserNotificationsAsRead(userId: string) {
   }
 }
 
-// User management functions
-export const createUser = async (userData: INewUser) => {
-  try {
-    const newUser = await account.create(
-      ID.unique(),
-      userData.email,
-      userData.password,
-      userData.name
-    );
-
-    if (!newUser) throw Error;
-
-    const avatarUrl = userData.imageUrl || '/assets/icons/profile-placeholder.svg';
-
-    await databases.createDocument(
-      appwriteConfig.databaseId,
-      appwriteConfig.userCollectionId,
-      ID.unique(),
-      {
-        accountId: newUser.$id,
-        email: userData.email,
-        name: userData.name,
-        imageUrl: avatarUrl,
-        ministryId: userData.ministryId || '',
-        status: userData.status || 'active',
-        mustChangePassword: userData.mustChangePassword || true
-      },
-      [
-        Permission.read(Role.users()),
-        Permission.update(Role.users()),
-        Permission.delete(Role.users())
-      ]
-    );
-
-    return newUser;
-  } catch (error) {
-    console.error("Error creating user:", error);
-    throw error;
-  }
-};
-
-export const updateUserMinistry = async (userId: string, ministryId: string) => {
-  try {
-    const user = await databases.getDocument(
-      appwriteConfig.databaseId,
-      appwriteConfig.userCollectionId,
-      userId
-    );
-
-    if (!user) throw Error;
-
-    const updatedUser = await databases.updateDocument(
-      appwriteConfig.databaseId,
-      appwriteConfig.userCollectionId,
-      userId,
-      {
-        ministryId
-      }
-    );
-
-    return updatedUser;
-  } catch (error) {
-    console.error("Error updating user ministry:", error);
-    throw error;
-  }
-};
-
-// =================================================================================================
-// CHAT - The Corrected Implementation
-// =================================================================================================
-
-// 初始化聊天集合
-export async function initializeChatCollections() {
-  try {
-    // 检查chats集合是否存在
-    try {
-      await databases.listDocuments(
-        appwriteConfig.databaseId,
-        appwriteConfig.chatCollectionId,
-        [Query.limit(1)]
-      );
-      console.log('Chats collection exists');
-    } catch (error) {
-      console.log('Chats collection does not exist, this is expected in demo mode');
-      // 在demo模式下，我们将使用现有的post collection来模拟聊天功能
-      return false;
-    }
-    
-    // 检查messages集合是否存在
-    try {
-      await databases.listDocuments(
-        appwriteConfig.databaseId,
-        appwriteConfig.messageCollectionId,
-        [Query.limit(1)]
-      );
-      console.log('Messages collection exists');
-    } catch (error) {
-      console.log('Messages collection does not exist, this is expected in demo mode');
-      return false;
-    }
-    
-    return true;
-  } catch (error) {
-    console.error('Error initializing chat collections:', error);
-    return false;
-  }
-}
-
-// 发送消息（使用全局存储支持双向聊天）
-export async function sendMessage(chatId: string, senderId: string, content: string, type: string = 'text', fileData?: any) {
-  try {
-    const newMessage = await databases.createDocument(
-      appwriteConfig.databaseId,
-      appwriteConfig.messageCollectionId,
-      ID.unique(),
-      {
-        chatId,
-        sender: senderId,
-        content,
-        messageType: type,
-        fileData: fileData ? JSON.stringify(fileData) : undefined,
-      },
-      [
-          Permission.read(Role.user(senderId)),
-          // The other participant's read permission is added via a server function or trigger
-      ]
-    );
-
-    await databases.updateDocument(
-        appwriteConfig.databaseId,
-        appwriteConfig.chatCollectionId,
-        chatId,
-        {
-            lastMessage: type === 'file' ? `Attachment: ${content}` : content,
-            lastMessageTime: new Date().toISOString()
-        }
-    );
-
-    return newMessage;
-  } catch (error) {
-    console.error("Failed to send message:", error);
-    throw error;
-  }
-}
-
-// 更新指定用户的聊天列表
-async function updateUserChatList(userId: string, chatId: string, content: string, type: string, userInfo?: any) {
-  try {
-    const userChatKey = `user_chats_${userId}`;
-    const chatList = JSON.parse(localStorage.getItem(userChatKey) || '[]');
-    const chatIndex = chatList.findIndex((chat: any) => chat.$id === chatId);
-    
-    const lastMessage = type === 'text' ? content : `发送了${type === 'file' ? '文件' : '媒体'}`;
-    const lastMessageTime = new Date().toISOString();
-
-    if (chatIndex >= 0) {
-      // 更新现有聊天记录
-      chatList[chatIndex].lastMessage = lastMessage;
-      chatList[chatIndex].lastMessageTime = lastMessageTime;
-      
-      // 更新或添加缓存的用户信息
-      if (userInfo && userInfo.name) {
-        chatList[chatIndex].cachedUserInfo = {
-          id: userInfo.id,
-          name: userInfo.name,
-          avatar: userInfo.avatar || '/assets/icons/profile-placeholder.svg',
-          online: userInfo.online || false
-        };
-        console.log('更新聊天记录中的缓存用户信息:', chatList[chatIndex].cachedUserInfo);
-      }
-    } else {
-      // 创建新的聊天记录
-      const newChatEntry: any = {
-        $id: chatId,
-        lastMessage: lastMessage,
-        lastMessageTime: lastMessageTime
-      };
-
-      // 如果提供了用户信息，保存它
-      if (userInfo && userInfo.name) {
-        newChatEntry.cachedUserInfo = {
-          id: userInfo.id,
-          name: userInfo.name,
-          avatar: userInfo.avatar || '/assets/icons/profile-placeholder.svg',
-          online: userInfo.online || false
-        };
-        console.log('创建新聊天记录中的缓存用户信息:', newChatEntry.cachedUserInfo);
-      }
-
-      chatList.push(newChatEntry);
-    }
-    
-    localStorage.setItem(userChatKey, JSON.stringify(chatList));
-    console.log(`已更新用户 ${userId} 的聊天列表，聊天ID: ${chatId}`);
-  } catch (error) {
-    console.error('更新用户聊天列表失败:', error);
-  }
-}
-
-// 为接收者获取发送者信息
-async function getSenderInfoForReceiver(senderId: string, receiverId: string) {
-  try {
-    console.log(`获取发送者信息: senderId=${senderId}, receiverId=${receiverId}`);
-    const sender = await getUserById(senderId);
-    if (sender) {
-      const senderInfo = {
-        id: sender.$id,
-        name: sender.name,
-        avatar: sender.imageUrl,
-        online: sender.isOnline || false
-      };
-      console.log('成功获取发送者信息:', senderInfo);
-      return senderInfo;
-    } else {
-      console.warn('未找到发送者信息');
-    }
-  } catch (error) {
-    console.error('获取发送者信息失败:', error);
-  }
-  return null;
-}
-
-// 确保双方用户都有聊天记录（用于URL参数启动聊天时）
-export async function ensureChatExistsForBothUsers(chatId: string, user1Id: string, user2Id: string, user1Info: any, user2Info: any) {
-  try {
-    // 为用户1创建与用户2的聊天记录
-    const user1ChatKey = `user_chats_${user1Id}`;
-    const user1ChatList = JSON.parse(localStorage.getItem(user1ChatKey) || '[]');
-    const user1ChatExists = user1ChatList.some((chat: any) => chat.$id === chatId);
-    
-    if (!user1ChatExists) {
-      user1ChatList.push({
-        $id: chatId,
-        lastMessage: '开始对话吧...',
-        lastMessageTime: new Date().toISOString(),
-        cachedUserInfo: user2Info
-      });
-      localStorage.setItem(user1ChatKey, JSON.stringify(user1ChatList));
-    }
-
-    // 为用户2创建与用户1的聊天记录
-    const user2ChatKey = `user_chats_${user2Id}`;
-    const user2ChatList = JSON.parse(localStorage.getItem(user2ChatKey) || '[]');
-    const user2ChatExists = user2ChatList.some((chat: any) => chat.$id === chatId);
-    
-    if (!user2ChatExists) {
-      user2ChatList.push({
-        $id: chatId,
-        lastMessage: '开始对话吧...',
-        lastMessageTime: new Date().toISOString(),
-        cachedUserInfo: user1Info
-      });
-      localStorage.setItem(user2ChatKey, JSON.stringify(user2ChatList));
-    }
-
-    return true;
-  } catch (error) {
-    console.error('确保双方聊天记录失败:', error);
-    return false;
-  }
-}
-
-// 获取聊天消息（从全局存储）
-export async function getChatMessages(chatId: string, limit: number = 50) {
-  try {
-    const response = await databases.listDocuments(
-      appwriteConfig.databaseId,
-      appwriteConfig.messageCollectionId,
-      [Query.equal('chatId', chatId), Query.orderDesc('$createdAt'), Query.limit(limit)]
-    );
-    return response.documents;
-  } catch (error) {
-    console.error(`Failed to get messages for chat ${chatId}:`, error);
-    return [];
-  }
-}
-
-// 获取用户的所有聊天列表（修复数据结构一致性）
-export async function getUserChats(userId: string) {
-  try {
-    console.log('🔍 开始获取用户聊天列表，用户ID:', userId);
-    
-    // 尝试多种查询方式以确保获取所有聊天记录
-    const queries = [
-      Query.contains('participants', userId),
-      Query.orderDesc('lastMessageTime')
-    ];
-    
-    console.log('📊 执行数据库查询，查询条件:', queries);
-    
-    const response = await databases.listDocuments(
-      appwriteConfig.databaseId,
-      appwriteConfig.chatCollectionId,
-      queries
-    );
-
-    console.log('✅ 数据库查询完成，原始结果:', {
-      total: response.total,
-      documentsCount: response.documents.length,
-      documents: response.documents.map(doc => ({
-        id: doc.$id,
-        participants: doc.participants,
-        lastMessage: doc.lastMessage,
-        lastMessageTime: doc.lastMessageTime
-      }))
-    });
-
-    const chats = await Promise.all(response.documents.map(async (chat) => {
-      console.log(`🔍 处理聊天记录 ${chat.$id}:`, {
-        participants: chat.participants,
-        lastMessage: chat.lastMessage
-      });
-      
-      // 从participants数组中找到另一个用户
-      const otherUserId = chat.participants?.find((id: string) => id !== userId);
-      if (!otherUserId) {
-        console.warn(`⚠️ 聊天 ${chat.$id} 有无效的参与者:`, chat.participants);
-        return null;
-      }
-      
-      try {
-        const otherUser = await getUserById(otherUserId);
-        if (!otherUser) {
-          console.warn(`⚠️ 无法找到用户 ${otherUserId}`);
-          return null;
-        }
-        
-        console.log(`✅ 成功获取聊天 ${chat.$id} 的对方用户信息:`, {
-          userId: otherUser.$id,
-          name: otherUser.name,
-          imageUrl: otherUser.imageUrl
-        });
-        
-        return {
-          ...chat,
-          otherUser,
-        };
-      } catch (error) {
-        console.error(`❌ 获取用户 ${otherUserId} 信息失败:`, error);
-        return null;
-      }
-    }));
-    
-    // 过滤掉null值（无效的聊天记录）
-    const validChats = chats.filter(chat => chat !== null);
-    
-    console.log('🎯 最终返回的聊天列表:', {
-      totalValidChats: validChats.length,
-      chats: validChats.map(chat => ({
-        id: chat.$id,
-        otherUserName: chat.otherUser?.name,
-        lastMessage: chat.lastMessage
-      }))
-    });
-    
-    return validChats;
-  } catch (error) {
-    console.error('❌ 获取用户聊天列表失败:', error);
-    return [];
-  }
-}
-
-// 新增：聊天数据同步修复函数
-export async function fixChatDataSync(userId: string) {
-  try {
-    console.log('🔧 开始修复聊天数据同步问题，用户ID:', userId);
-    
-    // 1. 获取数据库中的所有聊天记录
-    const dbChats = await getUserChats(userId);
-    console.log('📊 数据库聊天记录数量:', dbChats.length);
-    
-    // 2. 获取本地缓存的聊天记录
-    const localStorageKey = `chats_cache_${userId}`;
-    const localChatsRaw = localStorage.getItem(localStorageKey);
-    const localChats = localChatsRaw ? JSON.parse(localChatsRaw) : [];
-    console.log('💾 本地缓存聊天记录数量:', localChats.length);
-    
-    // 3. 比较和验证聊天记录
-    const dbChatIds = new Set(dbChats.map(chat => chat.$id));
-    const localChatIds = new Set(localChats.map((chat: any) => chat.$id));
-    
-    // 找出只在本地存在的聊天记录（可能是无效的）
-    const onlyInLocal = localChats.filter((chat: any) => !dbChatIds.has(chat.$id));
-    console.log('⚠️ 只在本地存在的聊天记录:', onlyInLocal.length, onlyInLocal.map((chat: any) => ({
-      id: chat.$id,
-      otherUserName: chat.otherUser?.name,
-      lastMessage: chat.lastMessage
-    })));
-    
-    // 找出只在数据库存在的聊天记录
-    const onlyInDb = dbChats.filter(chat => !localChatIds.has(chat.$id));
-    console.log('📥 只在数据库存在的聊天记录:', onlyInDb.length, onlyInDb.map(chat => ({
-      id: chat.$id,
-      otherUserName: chat.otherUser?.name,
-      lastMessage: chat.lastMessage
-    })));
-    
-    // 4. 尝试验证"只在本地"的聊天记录是否真的存在于数据库中
-    const validatedLocalChats = [];
-    for (const localChat of onlyInLocal) {
-      try {
-        console.log(`🔍 验证本地聊天记录 ${localChat.$id}...`);
-        const chatDoc = await databases.getDocument(
-          appwriteConfig.databaseId,
-          appwriteConfig.chatCollectionId,
-          localChat.$id
-        );
-        
-        if (chatDoc && chatDoc.participants?.includes(userId)) {
-          console.log(`✅ 聊天记录 ${localChat.$id} 确实存在于数据库中，但查询未返回`);
-          
-          // 获取对方用户信息
-          const otherUserId = chatDoc.participants.find((id: string) => id !== userId);
-          if (otherUserId) {
-            const otherUser = await getUserById(otherUserId);
-            if (otherUser) {
-              validatedLocalChats.push({
-                ...chatDoc,
-                otherUser
-              });
-            }
-          }
-        }
-      } catch (error) {
-        console.log(`❌ 聊天记录 ${localChat.$id} 在数据库中不存在或无权限访问`);
-      }
-    }
-    
-    // 5. 合并有效的聊天记录
-    const mergedChats = [...dbChats, ...validatedLocalChats];
-    
-    // 6. 去重（基于chat ID）
-    const uniqueChats = mergedChats.filter((chat, index, self) => 
-      index === self.findIndex(c => c.$id === chat.$id)
-    );
-    
-    // 7. 按最后消息时间排序
-    uniqueChats.sort((a, b) => 
-      new Date(b.lastMessageTime || 0).getTime() - new Date(a.lastMessageTime || 0).getTime()
-    );
-    
-    console.log('🎯 修复后的聊天列表:', {
-      totalChats: uniqueChats.length,
-      chats: uniqueChats.map(chat => ({
-        id: chat.$id,
-        otherUserName: chat.otherUser?.name,
-        lastMessage: chat.lastMessage,
-        lastMessageTime: chat.lastMessageTime
-      }))
-    });
-    
-    // 8. 更新本地缓存
-    localStorage.setItem(localStorageKey, JSON.stringify(uniqueChats));
-    
-    // 9. 清理无效的本地聊天记录
-    const invalidLocalChats = onlyInLocal.filter(
-      localChat => !validatedLocalChats.some(valid => valid.$id === localChat.$id)
-    );
-    
-    console.log('🧹 清理的无效本地聊天记录:', invalidLocalChats.length);
-    
-    const fixResult = {
-      success: true,
-      originalDbCount: dbChats.length,
-      originalLocalCount: localChats.length,
-      finalCount: uniqueChats.length,
-      addedFromDb: onlyInDb.length,
-      recoveredFromLocal: validatedLocalChats.length,
-      cleanedInvalid: invalidLocalChats.length,
-      chats: uniqueChats
-    };
-    
-    console.log('✅ 聊天数据同步修复完成:', fixResult);
-    return fixResult;
-    
-  } catch (error) {
-    console.error('❌ 聊天数据同步修复失败:', error);
-    return { success: false, error: error.message };
-  }
-}
-
-// 新增：高级聊天诊断函数
-export async function advancedChatDiagnosis(userId: string) {
-  try {
-    console.log('🔬 开始高级聊天诊断，用户ID:', userId);
-    
-    const diagnosis = {
-      userId,
-      timestamp: new Date().toISOString(),
-      databaseQuery: null as any,
-      rawDocuments: [] as any[],
-      processedChats: [] as any[],
-      localCache: null as any,
-      issues: [] as string[],
-      recommendations: [] as string[]
-    };
-    
-    // 1. 执行原始数据库查询
-    try {
-      const rawQuery = await databases.listDocuments(
-        appwriteConfig.databaseId,
-        appwriteConfig.chatCollectionId,
-        [Query.contains('participants', userId)]
-      );
-      
-      diagnosis.databaseQuery = {
-        total: rawQuery.total,
-        documentsCount: rawQuery.documents.length,
-        querySuccess: true
-      };
-      diagnosis.rawDocuments = rawQuery.documents;
-      
-      console.log('📊 原始数据库查询结果:', diagnosis.databaseQuery);
-    } catch (error) {
-      diagnosis.issues.push(`数据库查询失败: ${error.message}`);
-      diagnosis.databaseQuery = { querySuccess: false, error: error.message };
-    }
-    
-    // 2. 分析每个聊天记录
-    for (const doc of diagnosis.rawDocuments) {
-      console.log(`🔍 分析聊天文档 ${doc.$id}:`, doc);
-      
-      const chatAnalysis = {
-        id: doc.$id,
-        participants: doc.participants,
-        lastMessage: doc.lastMessage,
-        lastMessageTime: doc.lastMessageTime,
-        issues: [] as string[],
-        otherUser: null as any
-      };
-      
-      // 检查participants字段
-      if (!doc.participants || !Array.isArray(doc.participants)) {
-        chatAnalysis.issues.push('participants字段无效');
-      } else if (doc.participants.length !== 2) {
-        chatAnalysis.issues.push(`participants数量错误: ${doc.participants.length}`);
-      } else if (!doc.participants.includes(userId)) {
-        chatAnalysis.issues.push('用户不在participants中');
-      }
-      
-      // 获取对方用户信息
-      if (doc.participants && Array.isArray(doc.participants)) {
-        const otherUserId = doc.participants.find((id: string) => id !== userId);
-        if (otherUserId) {
-          try {
-            const otherUser = await getUserById(otherUserId);
-            if (otherUser) {
-              chatAnalysis.otherUser = {
-                id: otherUser.$id,
-                name: otherUser.name,
-                imageUrl: otherUser.imageUrl
-              };
-            } else {
-              chatAnalysis.issues.push(`无法找到对方用户: ${otherUserId}`);
-            }
-          } catch (error) {
-            chatAnalysis.issues.push(`获取对方用户信息失败: ${error.message}`);
-          }
-        } else {
-          chatAnalysis.issues.push('无法确定对方用户ID');
-        }
-      }
-      
-      diagnosis.processedChats.push(chatAnalysis);
-    }
-    
-    // 3. 检查本地缓存
-    const localCacheKey = `chats_cache_${userId}`;
-    const localCacheRaw = localStorage.getItem(localCacheKey);
-    if (localCacheRaw) {
-      try {
-        diagnosis.localCache = {
-          exists: true,
-          data: JSON.parse(localCacheRaw),
-          count: JSON.parse(localCacheRaw).length
-        };
-      } catch (error) {
-        diagnosis.localCache = { exists: true, parseError: error.message };
-        diagnosis.issues.push('本地缓存数据解析失败');
-      }
-    } else {
-      diagnosis.localCache = { exists: false };
-    }
-    
-    // 4. 生成问题总结和建议
-    if (diagnosis.databaseQuery?.documentsCount === 0) {
-      diagnosis.issues.push('数据库中没有找到任何聊天记录');
-      diagnosis.recommendations.push('检查是否有权限访问聊天记录');
-      diagnosis.recommendations.push('尝试重新创建聊天记录');
-    } else if (diagnosis.databaseQuery?.documentsCount === 1) {
-      diagnosis.issues.push('只找到1个聊天记录，可能存在其他聊天记录无法查询的问题');
-      diagnosis.recommendations.push('检查数据库权限设置');
-      diagnosis.recommendations.push('验证其他聊天记录是否存在');
-    }
-    
-    if (diagnosis.localCache?.count && diagnosis.localCache.count !== diagnosis.databaseQuery?.documentsCount) {
-      diagnosis.issues.push('本地缓存与数据库记录数量不一致');
-      diagnosis.recommendations.push('执行数据同步修复');
-    }
-    
-    const validChats = diagnosis.processedChats.filter(chat => chat.issues.length === 0);
-    diagnosis.recommendations.push(`发现 ${validChats.length} 个有效聊天记录`);
-    
-    console.log('🔬 高级诊断完成:', diagnosis);
-    return diagnosis;
-    
-  } catch (error) {
-    console.error('❌ 高级聊天诊断失败:', error);
-    return { success: false, error: error.message };
-  }
-}
-
-// 标记消息为已读（全局存储版本）
-export async function markMessagesAsRead(chatId: string, userId: string) {
-  try {
-    const messages = JSON.parse(localStorage.getItem(`global_chat_${chatId}`) || '[]');
-    
-    // 标记所有非当前用户发送的消息为已读
-    const updatedMessages = messages.map((message: any) => {
-      if (message.senderId !== userId) {
-        return { ...message, isRead: true };
-      }
-      return message;
-    });
-
-    localStorage.setItem(`global_chat_${chatId}`, JSON.stringify(updatedMessages));
-    return true;
-  } catch (error) {
-    console.error('标记消息为已读失败:', error);
-    throw error;
-  }
-}
-
-// 删除消息（全局存储版本）
-export async function deleteMessage(messageId: string) {
-  try {
-    await databases.deleteDocument(
-      appwriteConfig.databaseId,
-      appwriteConfig.messageCollectionId,
-      messageId
-    );
-    return { status: 'ok' };
-  } catch (error) {
-    console.error("Failed to delete message:", error);
-    throw error;
-  }
-}
-
-// 清理聊天相关的本地存储数据
-export function clearChatStorage() {
-  try {
-    // 清理所有聊天相关的键（user_chats_、global_chat_ 开头的键）
-    const keysToRemove = [];
-    for (let i = 0; i < localStorage.length; i++) {
-      const key = localStorage.key(i);
-      if (key && (key.startsWith('user_chats_') || key.startsWith('global_chat_') || key.startsWith('chat_'))) {
-        keysToRemove.push(key);
-      }
-    }
-    
-    keysToRemove.forEach(key => localStorage.removeItem(key));
-    
-    console.log(`已清理 ${keysToRemove.length} 个聊天相关的存储项`);
-    return true;
-  } catch (error) {
-    console.error('清理聊天存储失败:', error);
-    return false;
-  }
-}
-
-// 获取聊天存储统计信息
-export function getChatStorageInfo() {
-  try {
-    const info: any = {
-      userChats: {},
-      globalChats: {},
-      totalKeys: 0
-    };
-
-    // 获取所有聊天相关数据
-    for (let i = 0; i < localStorage.length; i++) {
-      const key = localStorage.key(i);
-      if (key) {
-        if (key.startsWith('user_chats_')) {
-          const userId = key.replace('user_chats_', '');
-          info.userChats[userId] = JSON.parse(localStorage.getItem(key) || '[]');
-          info.totalKeys++;
-        } else if (key.startsWith('global_chat_')) {
-          const chatId = key.replace('global_chat_', '');
-          info.globalChats[chatId] = JSON.parse(localStorage.getItem(key) || '[]');
-          info.totalKeys++;
-        } else if (key.startsWith('chat_')) {
-          // 旧格式的聊天数据
-          const chatId = key.replace('chat_', '');
-          if (!info.globalChats[chatId]) {
-            info.globalChats[chatId] = JSON.parse(localStorage.getItem(key) || '[]');
-            info.totalKeys++;
-          }
-        }
-      }
-    }
-
-    console.log('聊天存储详细信息:', info);
-    return info;
-  } catch (error) {
-    console.error('获取聊天存储信息失败:', error);
-    return null;
-  }
-}
-
-// 调试函数：检查特定用户的聊天记录
-export function debugUserChats(userId: string) {
-  try {
-    const userChatKey = `user_chats_${userId}`;
-    const userChats = localStorage.getItem(userChatKey);
-    console.log(`用户 ${userId} 的聊天记录:`, userChats ? JSON.parse(userChats) : '无记录');
-    
-    // 检查所有相关的聊天消息
-    const allKeys = [];
-    for (let i = 0; i < localStorage.length; i++) {
-      const key = localStorage.key(i);
-      if (key && (key.includes(userId) || key.startsWith('global_chat_'))) {
-        allKeys.push({
-          key,
-          data: JSON.parse(localStorage.getItem(key) || '{}')
-        });
-      }
-    }
-    console.log(`与用户 ${userId} 相关的所有存储:`, allKeys);
-    
-    return { userChats: userChats ? JSON.parse(userChats) : [], allRelatedKeys: allKeys };
-  } catch (error) {
-    console.error('调试用户聊天记录失败:', error);
-    return null;
-  }
-}
-
-// 全面诊断聊天存储状态
-export function comprehensiveChatDiagnosis() {
-  console.log('=== 开始全面聊天存储诊断 ===');
-  
-  const diagnosis: {
-    localStorage: { [key: string]: any },
-    userChatKeys: string[],
-    globalChatKeys: string[],
-    issues: string[]
-  } = {
-    localStorage: {},
-    userChatKeys: [],
-    globalChatKeys: [],
-    issues: []
-  };
-
-  // 扫描所有localStorage
-  for (let i = 0; i < localStorage.length; i++) {
-    const key = localStorage.key(i);
-    if (key) {
-      if (key.startsWith('user_chats_')) {
-        diagnosis.userChatKeys.push(key);
-        const userId = key.replace('user_chats_', '');
-        try {
-          const data = JSON.parse(localStorage.getItem(key) || '[]');
-          diagnosis.localStorage[key] = data;
-          console.log(`用户聊天列表 ${userId}:`, data);
-          
-          // 检查每个聊天记录
-          data.forEach((chat: any, index: number) => {
-            console.log(`  聊天 ${index + 1}: ${chat.$id}`);
-            console.log(`    最后消息: ${chat.lastMessage}`);
-            console.log(`    缓存用户信息:`, chat.cachedUserInfo);
-            
-            if (!chat.cachedUserInfo) {
-              diagnosis.issues.push(`用户 ${userId} 的聊天 ${chat.$id} 缺少缓存用户信息`);
-            } else if (!chat.cachedUserInfo.name || chat.cachedUserInfo.name === '未知用户') {
-              diagnosis.issues.push(`用户 ${userId} 的聊天 ${chat.$id} 用户信息不完整: ${JSON.stringify(chat.cachedUserInfo)}`);
-            }
-          });
-        } catch (error) {
-          diagnosis.issues.push(`解析用户聊天列表失败: ${key} - ${error}`);
-        }
-      } else if (key.startsWith('global_chat_')) {
-        diagnosis.globalChatKeys.push(key);
-        const chatId = key.replace('global_chat_', '');
-        try {
-          const messages = JSON.parse(localStorage.getItem(key) || '[]');
-          console.log(`全局聊天消息 ${chatId}: ${messages.length} 条消息`);
-          if (messages.length > 0) {
-            const lastMessage = messages[messages.length - 1];
-            console.log(`  最新消息:`, lastMessage);
-          }
-        } catch (error) {
-          diagnosis.issues.push(`解析全局聊天消息失败: ${key} - ${error}`);
-        }
-      }
-    }
-  }
-
-  console.log('=== 诊断结果 ===');
-  console.log('发现的问题:', diagnosis.issues);
-  console.log('用户聊天列表数量:', diagnosis.userChatKeys.length);
-  console.log('全局聊天数量:', diagnosis.globalChatKeys.length);
-  
-  return diagnosis;
-}
-
-// 获取当前用户的完整信息用于调试
-export async function debugCurrentUserInfo() {
-  try {
-    console.log('🧪 获取当前用户完整信息...');
-    const currentUser = await getCurrentUser();
-    
-    if (currentUser) {
-      console.log('✅ 当前用户信息:');
-      console.log('📝 用户名:', currentUser.name);
-      console.log('🆔 文档ID:', currentUser.$id);
-      console.log('🔑 账户ID:', currentUser.accountId);
-      console.log('📧 邮箱:', currentUser.email);
-      console.log('🖼️ 头像:', currentUser.imageUrl);
-      console.log('📦 完整对象:', JSON.stringify(currentUser, null, 2));
-      return currentUser;
-    } else {
-      console.error('❌ 当前用户为空');
-      return null;
-    }
-  } catch (error) {
-    console.error('❌ 获取当前用户信息失败:', error);
-    throw error;
-  }
-}
-
-// 测试用户信息获取功能
-export async function testUserInfoRetrieval(userId: string) {
-  console.log('🧪 开始测试用户信息获取功能...');
-  console.log('🔍 测试用户ID:', userId);
-  
-  try {
-    console.log('🌐 调用 getUserById...');
-    const user = await getUserById(userId);
-    
-    console.log('📦 返回结果:', JSON.stringify(user, null, 2));
-    
-    if (user) {
-      console.log('✅ 用户信息获取成功');
-      console.log('📝 用户名:', user.name);
-      console.log('🆔 文档ID:', user.$id);
-      console.log('🔑 账户ID:', user.accountId);
-      console.log('📧 邮箱:', user.email);
-      console.log('🖼️ 头像:', user.imageUrl);
-      console.log('🌐 在线状态:', user.isOnline);
-      return user;
-    } else {
-      console.error('❌ 用户信息为空');
-      return null;
-    }
-  } catch (error) {
-    console.error('❌ 用户信息获取失败:', error);
-    throw error;
-  }
-}
-
-// 强制刷新所有聊天记录的用户信息
-export async function forceRefreshAllChatUsers(userId: string) {
-  try {
-    console.log('🔄 开始强制刷新所有聊天记录的用户信息...');
-    console.log('🔍 当前用户ID:', userId);
-    
-    const userChatKey = `user_chats_${userId}`;
-    const chatList = JSON.parse(localStorage.getItem(userChatKey) || '[]');
-    
-    console.log(`📊 发现 ${chatList.length} 个聊天记录需要刷新`);
-    console.log('📋 完整聊天列表:', JSON.stringify(chatList, null, 2));
-    
-    for (let i = 0; i < chatList.length; i++) {
-      const chat = chatList[i];
-      console.log(`\n🔄 处理聊天记录 ${i + 1}/${chatList.length}:`);
-      console.log('📝 聊天ID:', chat.$id);
-      console.log('💬 当前最后消息:', chat.lastMessage);
-      console.log('👤 当前缓存用户信息:', chat.cachedUserInfo);
-      
-      // 从聊天ID中提取对方用户ID
-      const chatIdParts = chat.$id.split('_');
-      console.log('🔧 聊天ID分割结果:', chatIdParts);
-      
-      if (chatIdParts.length === 2) {
-        const [user1, user2] = chatIdParts;
-        const otherUserId = user1 === userId ? user2 : user1;
-        
-        console.log(`🎯 确定对方用户ID: ${otherUserId} (user1: ${user1}, user2: ${user2}, 当前用户: ${userId})`);
-        
-        try {
-          console.log(`🌐 开始从数据库获取用户信息: ${otherUserId}`);
-          const otherUser = await getUserById(otherUserId);
-          
-          console.log('📦 数据库返回的用户信息:', JSON.stringify(otherUser, null, 2));
-          
-          if (otherUser && otherUser.name) {
-            const newUserInfo = {
-              id: otherUser.$id,
-              name: otherUser.name,
-              avatar: otherUser.imageUrl,
-              online: otherUser.isOnline || false
-            };
-            
-            chatList[i].cachedUserInfo = newUserInfo;
-            console.log(`✅ 成功刷新用户信息:`, newUserInfo);
-          } else {
-            const fallbackInfo = {
-              id: otherUserId,
-              name: `用户_${otherUserId.slice(-4)}`,
-              avatar: '/assets/icons/profile-placeholder.svg',
-              online: false
-            };
-            
-            console.warn(`⚠️ 用户信息不完整，使用备用信息:`, fallbackInfo);
-            console.warn('原始用户数据:', otherUser);
-            chatList[i].cachedUserInfo = fallbackInfo;
-          }
-        } catch (error) {
-          const errorInfo = {
-            id: otherUserId,
-            name: `用户_${otherUserId.slice(-4)}`,
-            avatar: '/assets/icons/profile-placeholder.svg',
-            online: false
-          };
-          
-          console.error(`❌ 获取用户 ${otherUserId} 信息失败:`, error);
-          console.log('🔄 使用错误备用信息:', errorInfo);
-          chatList[i].cachedUserInfo = errorInfo;
-        }
-      } else {
-        console.error(`❌ 聊天ID格式不正确: ${chat.$id}`);
-      }
-    }
-    
-    // 保存更新的聊天列表
-    localStorage.setItem(userChatKey, JSON.stringify(chatList));
-    console.log('✅ 所有聊天记录用户信息刷新完成');
-    console.log('📋 最终聊天列表:', JSON.stringify(chatList, null, 2));
-    
-    return chatList;
-  } catch (error) {
-    console.error('❌ 强制刷新聊天用户信息失败:', error);
-    throw error;
-  }
-}
-
-// 修复函数：更新现有聊天记录中的用户信息
-export async function fixChatUserInfo(userId: string) {
-  try {
-    console.log('开始修复用户聊天记录中的用户信息...');
-    
-    // 先做诊断
-    const diagnosis = comprehensiveChatDiagnosis();
-    
-    const userChatKey = `user_chats_${userId}`;
-    const chatList = JSON.parse(localStorage.getItem(userChatKey) || '[]');
-    
-    console.log(`当前用户 ${userId} 的聊天列表:`, chatList);
-    
-    let updated = false;
-    
-    for (let i = 0; i < chatList.length; i++) {
-      const chat = chatList[i];
-      console.log(`处理聊天记录 ${i + 1}:`, chat);
-      
-      if (!chat.cachedUserInfo || !chat.cachedUserInfo.name || chat.cachedUserInfo.name === '未知用户') {
-        // 从聊天ID中提取对方用户ID
-        const chatIdParts = chat.$id.split('_');
-        if (chatIdParts.length === 2) {
-          const [user1, user2] = chatIdParts;
-          const otherUserId = user1 === userId ? user2 : user1;
-          
-          console.log(`尝试修复聊天记录: ${chat.$id}, 对方用户ID: ${otherUserId}`);
-          
-          try {
-            const otherUser = await getUserById(otherUserId);
-            console.log(`获取到的用户信息:`, otherUser);
-            
-            if (otherUser && otherUser.name) {
-              chatList[i].cachedUserInfo = {
-                id: otherUser.$id,
-                name: otherUser.name,
-                avatar: otherUser.imageUrl,
-                online: otherUser.isOnline || false
-              };
-              console.log('成功修复用户信息:', chatList[i].cachedUserInfo);
-              updated = true;
-            } else {
-              console.warn('获取到的用户信息不完整或为空');
-            }
-          } catch (error) {
-            console.error('修复用户信息失败:', error);
-          }
-        } else {
-          console.warn('聊天ID格式不正确:', chat.$id);
-        }
-      } else {
-        console.log('聊天记录已有有效的用户信息:', chat.cachedUserInfo);
-      }
-    }
-    
-    if (updated) {
-      localStorage.setItem(userChatKey, JSON.stringify(chatList));
-      console.log('聊天记录修复完成，已保存更新。新的聊天列表:');
-      console.log(JSON.stringify(chatList, null, 2));
-      return true;
-    } else {
-      console.log('没有需要修复的聊天记录');
-      return false;
-    }
-  } catch (error) {
-    console.error('修复聊天用户信息失败:', error);
-    return false;
-  }
-}
-
-// 添加专门处理用户头像URL的函数
-export function getUserAvatarUrl(imageUrl: string | null | undefined): string {
-    try {
-        // 如果没有图片URL，返回默认头像
-        if (!imageUrl) {
-            return '/assets/icons/profile-placeholder.svg';
-        }
-        
-        // 如果已经是完整的URL（包含http/https），直接返回
-        if (imageUrl.startsWith('http://') || imageUrl.startsWith('https://')) {
-            console.log('🖼️ 使用完整URL头像:', imageUrl);
-            return imageUrl;
-        }
-        
-        // 如果是相对路径（如 /assets/），直接返回
-        if (imageUrl.startsWith('/')) {
-            console.log('🖼️ 使用相对路径头像:', imageUrl);
-            return imageUrl;
-        }
-        
-        // 如果看起来像文件ID（没有协议和路径），尝试作为Storage文件处理
-        if (imageUrl.length > 10 && !imageUrl.includes('/')) {
-            console.log('🖼️ 检测到Storage文件ID，生成预览URL:', imageUrl);
-            const fileUrl = storage.getFileView(
-                appwriteConfig.storageId,
-                imageUrl
-            );
-            const finalUrl = fileUrl.toString();
-            console.log('🖼️ 生成的Storage URL:', finalUrl);
-            return finalUrl;
-        }
-        
-        // 其他情况，尝试直接使用
-        console.log('🖼️ 直接使用头像URL:', imageUrl);
-        return imageUrl;
-        
-    } catch (error) {
-        console.error("获取用户头像URL失败:", error);
-        console.log('🖼️ 使用默认头像作为备用');
-        return '/assets/icons/profile-placeholder.svg';
-    }
-}
-
-// ============================================================
-// CALL HISTORY
-// ============================================================
-
-export interface ICallRecord {
-  callerId: string;
-  receiverId: string;
-  callerName: string;
-  receiverName: string;
-  callerAvatar?: string;
-  receiverAvatar?: string;
-  status: 'completed' | 'missed' | 'rejected';
-  duration?: number;
-  initiatedAt: string;
-}
-
-// 创建通话记录
-export async function createCallRecord(callData: ICallRecord) {
-  try {
-    const record = await databases.createDocument(
-      appwriteConfig.databaseId,
-      appwriteConfig.callsCollectionId,
-      ID.unique(),
-      callData
-    );
-    return record;
-  } catch (error) {
-    console.error("Failed to create call record:", error);
-    throw error;
-  }
-}
-
-// 获取用户的通话记录
-export async function getCallHistoryForUser(userId: string) {
-  try {
-    const response = await databases.listDocuments(
-      appwriteConfig.databaseId,
-      appwriteConfig.callsCollectionId,
-      [
-        Query.or([
-          Query.equal('callerId', userId),
-          Query.equal('receiverId', userId)
-        ]),
-        Query.orderDesc('initiatedAt'),
-        Query.limit(50)
-      ]
-    );
-    return response.documents as (Models.Document & ICallRecord)[];
-  } catch (error) {
-    console.error("Failed to get call history:", error);
-    throw error;
-  }
-}
-
-// ============================================================
-// NOTIFICATIONS
-// ============================================================
-export interface IAppNotification {
-  userId: string;
-  type: 'missed_call' | 'new_message' | 'friend_request';
-  message: string;
-  relatedItemId?: string;
-  isRead: boolean;
-}
-
-// 创建通知
-export async function createNotification(notificationData: Omit<IAppNotification, 'isRead'>) {
-  try {
-    const newNotification = await databases.createDocument(
-      appwriteConfig.databaseId,
-      appwriteConfig.notificationCollectionId,
-      ID.unique(),
-      {
-        ...notificationData,
-        isRead: false, // 确保初始状态为未读
-      }
-    );
-    console.log("🔔 通知创建成功:", newNotification);
-    return newNotification;
-  } catch (error) {
-    console.error("创建通知失败:", error);
-    throw new Error("创建通知时出错");
-  }
-}
-
-// 获取用户未读通知数量
 export async function getUnreadNotificationsCount(userId: string) {
   try {
     const response = await databases.listDocuments(
@@ -2720,10 +1405,8 @@ export async function getUnreadNotificationsCount(userId: string) {
   }
 }
 
-// 将通知标记为已读
 export async function markNotificationsAsRead(userId: string, type?: 'missed_call') {
   try {
-    // 1. 先查询所有未读通知
     const queries = [Query.equal('userId', userId), Query.equal('isRead', false)];
     if (type) {
       queries.push(Query.equal('type', type));
@@ -2735,7 +1418,6 @@ export async function markNotificationsAsRead(userId: string, type?: 'missed_cal
       queries
     );
 
-    // 2. 遍历并更新每一条为已读
     const updatePromises = response.documents.map(doc => 
       databases.updateDocument(
         appwriteConfig.databaseId,
@@ -2753,7 +1435,1290 @@ export async function markNotificationsAsRead(userId: string, type?: 'missed_cal
   }
 }
 
-// ============================================================
-// SEARCH
-// ============================================================
-// ============================================================
+// =================================================================================================
+// CALL HISTORY & NOTIFICATIONS
+// =================================================================================================
+
+export interface ICallRecord {
+  callerId: string;
+  receiverId: string;
+  callerName: string;
+  receiverName: string;
+  callerAvatar?: string;
+  receiverAvatar?: string;
+  status: 'completed' | 'missed' | 'rejected';
+  duration?: number;
+  initiatedAt: string;
+}
+
+export async function createCallRecord(callData: ICallRecord) {
+  try {
+    const record = await databases.createDocument(
+      appwriteConfig.databaseId,
+      appwriteConfig.callsCollectionId,
+      ID.unique(),
+      callData
+    );
+    return record;
+  } catch (error) {
+    console.error("Failed to create call record:", error);
+    throw error;
+  }
+}
+
+export async function createNotification(notificationData: {
+  userId: string;
+  type: 'missed_call' | 'new_message' | 'friend_request';
+  message: string;
+  relatedItemId?: string;
+}) {
+  try {
+    const newNotification = await databases.createDocument(
+      appwriteConfig.databaseId,
+      appwriteConfig.notificationCollectionId,
+      ID.unique(),
+      {
+        ...notificationData,
+        isRead: false,
+      }
+    );
+    console.log("🔔 通知创建成功:", newNotification);
+    return newNotification;
+  } catch (error) {
+    console.error("创建通知失败:", error);
+    throw new Error("创建通知时出错");
+  }
+}
+
+// =================================================================================================
+// MESSAGE REPAIR FUNCTIONS
+// =================================================================================================
+
+export async function diagnoseCorruptedMessages(chatId: string) {
+  try {
+    const response = await databases.listDocuments(
+      appwriteConfig.databaseId,
+      appwriteConfig.messageCollectionId,
+      [
+        Query.equal('chatId', chatId),
+        Query.orderDesc('$createdAt'),
+        Query.limit(50)
+      ]
+    );
+
+    const corruptedMessages = response.documents.filter(msg => 
+      msg.content === 'text' || 
+      msg.content === '' || 
+      !msg.content
+    );
+
+    const validMessages = response.documents.filter(msg => 
+      msg.content && 
+      msg.content !== 'text' && 
+      msg.content.trim() !== ''
+    );
+
+    console.log('📊 Message Diagnosis Results:');
+    console.log(`Total messages: ${response.documents.length}`);
+    console.log(`Corrupted messages: ${corruptedMessages.length}`);
+    console.log(`Valid messages: ${validMessages.length}`);
+    
+    console.log('\n🔍 Corrupted Messages:');
+    corruptedMessages.forEach(msg => {
+      console.log(`- ID: ${msg.$id}, Content: "${msg.content}", Sender: ${msg.sender}, Created: ${msg.$createdAt}`);
+    });
+
+    console.log('\n✅ Valid Messages:');
+    validMessages.forEach(msg => {
+      console.log(`- ID: ${msg.$id}, Content: "${msg.content}", Sender: ${msg.sender}, Created: ${msg.$createdAt}`);
+    });
+
+    return {
+      total: response.documents.length,
+      corrupted: corruptedMessages,
+      valid: validMessages,
+      corruptedCount: corruptedMessages.length,
+      validCount: validMessages.length
+    };
+  } catch (error) {
+    console.error('Failed to diagnose messages:', error);
+    throw error;
+  }
+}
+
+export async function repairCorruptedMessage(messageId: string, newContent: string) {
+  try {
+    const updatedMessage = await databases.updateDocument(
+      appwriteConfig.databaseId,
+      appwriteConfig.messageCollectionId,
+      messageId,
+      { content: newContent }
+    );
+    
+    console.log(`✅ Repaired message ${messageId}: "${newContent}"`);
+    return updatedMessage;
+  } catch (error) {
+    console.error(`Failed to repair message ${messageId}:`, error);
+    throw error;
+  }
+}
+
+export async function batchRepairCorruptedMessages(chatId: string, defaultContent: string = "Fixed message") {
+  try {
+    const diagnosis = await diagnoseCorruptedMessages(chatId);
+    
+    if (diagnosis.corruptedCount === 0) {
+      console.log('✅ No corrupted messages found!');
+      return { success: true, repairedCount: 0 };
+    }
+
+    console.log(`🔧 Starting batch repair of ${diagnosis.corruptedCount} corrupted messages...`);
+    
+    let repairedCount = 0;
+    for (const corruptedMsg of diagnosis.corrupted) {
+      try {
+        // Use a generic message or ask user for specific content
+        const content = prompt(`Enter content for message ${corruptedMsg.$id} (sent at ${corruptedMsg.$createdAt}):`) || defaultContent;
+        await repairCorruptedMessage(corruptedMsg.$id, content);
+        repairedCount++;
+      } catch (error) {
+        console.error(`Failed to repair message ${corruptedMsg.$id}:`, error);
+      }
+    }
+
+    console.log(`✅ Batch repair completed: ${repairedCount}/${diagnosis.corruptedCount} messages repaired`);
+    
+    return {
+      success: true,
+      repairedCount,
+      totalCorrupted: diagnosis.corruptedCount
+    };
+  } catch (error) {
+    console.error('Batch repair failed:', error);
+    throw error;
+  }
+}
+
+export async function autoRepairWithPlaceholders(chatId: string) {
+  try {
+    const diagnosis = await diagnoseCorruptedMessages(chatId);
+    
+    if (diagnosis.corruptedCount === 0) {
+      console.log('✅ No corrupted messages found!');
+      return { success: true, repairedCount: 0 };
+    }
+
+    console.log(`🔧 Auto-repairing ${diagnosis.corruptedCount} corrupted messages with placeholders...`);
+    
+    let repairedCount = 0;
+    for (let i = 0; i < diagnosis.corrupted.length; i++) {
+      const corruptedMsg = diagnosis.corrupted[i];
+      try {
+        // Create a meaningful placeholder based on position
+        const content = `Message ${i + 1}`;
+        await repairCorruptedMessage(corruptedMsg.$id, content);
+        repairedCount++;
+      } catch (error) {
+        console.error(`Failed to repair message ${corruptedMsg.$id}:`, error);
+      }
+    }
+
+    console.log(`✅ Auto-repair completed: ${repairedCount}/${diagnosis.corruptedCount} messages repaired`);
+    
+    return {
+      success: true,
+      repairedCount,
+      totalCorrupted: diagnosis.corruptedCount
+    };
+  } catch (error) {
+    console.error('Auto-repair failed:', error);
+    throw error;
+  }
+}
+
+// =================================================================================================
+// SIMPLIFIED DATABASE OPERATIONS
+// =================================================================================================
+
+export async function getAllChatData(chatId: string) {
+  try {
+    // Get chat document
+    const chat = await databases.getDocument(
+      appwriteConfig.databaseId,
+      appwriteConfig.chatCollectionId,
+      chatId
+    );
+
+    // Get all messages for this chat
+    const messagesResponse = await databases.listDocuments(
+      appwriteConfig.databaseId,
+      appwriteConfig.messageCollectionId,
+      [
+        Query.equal('chatId', chatId),
+        Query.orderAsc('$createdAt'),
+        Query.limit(1000) // Get up to 1000 messages
+      ]
+    );
+
+    return {
+      chat,
+      messages: messagesResponse.documents,
+      totalMessages: messagesResponse.total
+    };
+  } catch (error) {
+    console.error('Failed to get complete chat data:', error);
+    throw error;
+  }
+}
+
+export async function updateChatAndLastMessage(chatId: string, lastMessageContent: string) {
+  try {
+    const updatedChat = await databases.updateDocument(
+      appwriteConfig.databaseId,
+      appwriteConfig.chatCollectionId,
+      chatId,
+      {
+        lastMessage: lastMessageContent,
+        lastMessageTime: new Date().toISOString()
+      }
+    );
+    
+    console.log(`✅ Updated chat ${chatId} with last message: "${lastMessageContent}"`);
+    return updatedChat;
+  } catch (error) {
+    console.error('Failed to update chat last message:', error);
+    throw error;
+  }
+}
+
+export async function deleteEntireChat(chatId: string) {
+  try {
+    // First, delete all messages in the chat
+    const messagesResponse = await databases.listDocuments(
+      appwriteConfig.databaseId,
+      appwriteConfig.messageCollectionId,
+      [Query.equal('chatId', chatId)]
+    );
+
+    // Delete messages in batches
+    const deletePromises = messagesResponse.documents.map(msg =>
+      databases.deleteDocument(
+        appwriteConfig.databaseId,
+        appwriteConfig.messageCollectionId,
+        msg.$id
+      )
+    );
+    
+    await Promise.all(deletePromises);
+    console.log(`✅ Deleted ${messagesResponse.documents.length} messages`);
+
+    // Then delete the chat document
+    await databases.deleteDocument(
+      appwriteConfig.databaseId,
+      appwriteConfig.chatCollectionId,
+      chatId
+    );
+    
+    console.log(`✅ Deleted chat ${chatId}`);
+    
+    return {
+      success: true,
+      deletedMessages: messagesResponse.documents.length
+    };
+  } catch (error) {
+    console.error('Failed to delete entire chat:', error);
+    throw error;
+  }
+}
+
+export async function recreateChatFromScratch(user1Id: string, user2Id: string, initialMessage?: string) {
+  try {
+    // Create new chat
+    const newChat = await databases.createDocument(
+      appwriteConfig.databaseId,
+      appwriteConfig.chatCollectionId,
+      ID.unique(),
+      {
+        participants: [user1Id, user2Id],
+        lastMessage: initialMessage || '',
+        lastMessageTime: new Date().toISOString()
+      },
+      [
+        Permission.read(Role.users()),
+        Permission.update(Role.users()),
+        Permission.delete(Role.users()),
+      ]
+    );
+
+    // Add initial message if provided
+    if (initialMessage) {
+      await databases.createDocument(
+        appwriteConfig.databaseId,
+        appwriteConfig.messageCollectionId,
+        ID.unique(),
+        {
+          chatId: newChat.$id,
+          sender: user1Id,
+          content: initialMessage,
+          messageType: 'text'
+        },
+        [
+          Permission.read(Role.users()),
+          Permission.update(Role.users()),
+          Permission.delete(Role.users()),
+        ]
+      );
+    }
+
+    console.log(`✅ Created new chat ${newChat.$id} between ${user1Id} and ${user2Id}`);
+    return newChat;
+  } catch (error) {
+    console.error('Failed to recreate chat:', error);
+    throw error;
+  }
+}
+
+// =================================================================================================
+// EXISTING MESSAGE REPAIR FUNCTIONS
+// =================================================================================================
+
+// =================================================================================================
+// 消息定时清理功能
+// =================================================================================================
+
+/**
+ * 计算消息过期时间戳
+ * 注意：这里计算的是消息应该被删除的时间点
+ * 例如：设置保留7天，则当前时间往前推7天之前的消息都应该被删除
+ */
+export function calculateExpirationTimestamp(duration: DisappearingMessageDuration): string | null {
+  if (duration === 'off') return null;
+  
+  const now = new Date();
+  
+  const durationMap = {
+    '1day': 24 * 60 * 60 * 1000,      // 保留1天
+    '3days': 3 * 24 * 60 * 60 * 1000, // 保留3天
+    '7days': 7 * 24 * 60 * 60 * 1000, // 保留7天
+    '30days': 30 * 24 * 60 * 60 * 1000, // 保留30天
+  };
+  
+  const milliseconds = durationMap[duration];
+  if (!milliseconds) return null;
+  
+  // 计算保留期限的截止时间：当前时间减去保留期限
+  // 例如：现在是2024-01-08，保留7天，则2024-01-01之前的消息应该被删除
+  const cutoffTime = new Date(now.getTime() - milliseconds).toISOString();
+  
+  return cutoffTime;
+}
+
+/**
+ * 获取聊天的消息定时清理设置
+ */
+export async function getChatDisappearingSettings(chatId: string): Promise<IDisappearingMessageSettings | null> {
+  try {
+    const chat = await databases.getDocument(
+      appwriteConfig.databaseId,
+      appwriteConfig.chatCollectionId,
+      chatId
+    );
+    
+    if (chat.disappearingMessages) {
+      const settings = typeof chat.disappearingMessages === 'string' 
+        ? JSON.parse(chat.disappearingMessages) 
+        : chat.disappearingMessages;
+      return settings;
+    }
+    
+    return null;
+  } catch (error) {
+    console.error('Failed to get disappearing message settings:', error);
+    return null;
+  }
+}
+
+/**
+ * 更新聊天的消息定时清理设置
+ */
+export async function updateChatDisappearingSettings(
+  chatId: string, 
+  duration: DisappearingMessageDuration, 
+  userId: string
+): Promise<IDisappearingMessageSettings> {
+  try {
+    const settings: IDisappearingMessageSettings = {
+      chatId,
+      duration,
+      enabledBy: userId,
+      enabledAt: new Date().toISOString(),
+      isEnabled: duration !== 'off'
+    };
+    
+    await databases.updateDocument(
+      appwriteConfig.databaseId,
+      appwriteConfig.chatCollectionId,
+      chatId,
+      {
+        disappearingMessages: JSON.stringify(settings)
+      }
+    );
+    
+    // 发送系统通知消息
+    await sendDisappearingMessageNotification(chatId, userId, duration);
+    
+    return settings;
+  } catch (error) {
+    console.error('Failed to update disappearing message settings:', error);
+    throw error;
+  }
+}
+
+/**
+ * 发送消息定时清理设置变更的系统通知
+ */
+export async function sendDisappearingMessageNotification(
+  chatId: string, 
+  userId: string, 
+  duration: DisappearingMessageDuration
+): Promise<void> {
+  try {
+    const user = await getUserById(userId);
+    if (!user) return;
+    
+    let content: string;
+    if (duration === 'off') {
+      content = `${user.name} 已关闭消息定时清理。点击可开启。`;
+    } else {
+      const durationText = {
+        '1day': '1天',
+        '3days': '3天', 
+        '7days': '7天',
+        '30days': '30天'
+      }[duration] || duration;
+      
+      content = `${user.name} 已开启消息定时清理。此聊天中的新消息将在发送 ${durationText} 后消失。点击可更改。`;
+    }
+    
+    await databases.createDocument(
+      appwriteConfig.databaseId,
+      appwriteConfig.messageCollectionId,
+      ID.unique(),
+      {
+        chatId,
+        sender: 'system',
+        content,
+        messageType: 'system_disappearing_message',
+        expirationTimestamp: null, // 系统消息不过期
+      },
+      [
+        Permission.read(Role.users()),
+        Permission.update(Role.users()),
+        Permission.delete(Role.users()),
+      ]
+    );
+  } catch (error) {
+    console.error('Failed to send disappearing message notification:', error);
+  }
+}
+
+/**
+ * 清理过期消息（服务器端定时任务会调用）
+ * 新逻辑：根据每个聊天的定时清理设置，删除超过保留期限的消息
+ */
+export async function cleanupExpiredMessages(): Promise<number> {
+  try {
+    // 1. 获取所有开启了消息定时清理的聊天
+    const allChats = await databases.listDocuments(
+      appwriteConfig.databaseId,
+      appwriteConfig.chatCollectionId,
+      [
+        Query.isNotNull('disappearingMessages'),
+        Query.limit(100)
+      ]
+    );
+    
+    let totalDeletedCount = 0;
+    
+    // 2. 遍历每个聊天，根据其设置清理消息
+    for (const chat of allChats.documents) {
+      try {
+        // 解析聊天的定时清理设置
+        const settings = typeof chat.disappearingMessages === 'string' 
+          ? JSON.parse(chat.disappearingMessages) 
+          : chat.disappearingMessages;
+        
+        if (!settings || !settings.isEnabled || settings.duration === 'off') {
+          continue; // 跳过未启用的聊天
+        }
+        
+        // 3. 计算该聊天的保留截止时间
+        const cutoffTime = calculateExpirationTimestamp(settings.duration);
+        
+        if (!cutoffTime) continue;
+        
+        // 4. 查询该聊天中超过保留期限的消息
+        const expiredMessages = await databases.listDocuments(
+          appwriteConfig.databaseId,
+          appwriteConfig.messageCollectionId,
+          [
+            Query.equal('chatId', chat.$id),
+            Query.lessThan('$createdAt', cutoffTime),
+            Query.notEqual('messageType', 'system_disappearing_message'), // 不删除系统消息
+            Query.limit(50) // 批量处理
+          ]
+        );
+        
+        // 5. 删除过期消息
+        for (const message of expiredMessages.documents) {
+          try {
+            await databases.deleteDocument(
+              appwriteConfig.databaseId,
+              appwriteConfig.messageCollectionId,
+              message.$id
+            );
+            totalDeletedCount++;
+          } catch (error) {
+            // 静默处理单个消息删除失败
+          }
+        }
+        
+      } catch (error) {
+        // 静默处理单个聊天处理失败
+      }
+    }
+    
+    return totalDeletedCount;
+  } catch (error) {
+    return 0;
+  }
+}
+
+/**
+ * 获取聊天中所有消息的过期状态（调试用）
+ */
+export async function debugChatExpirationStatus(chatId: string) {
+  try {
+    // 1. 获取聊天的定时清理设置
+    const chatSettings = await getChatDisappearingSettings(chatId);
+    
+    // 2. 获取聊天中的所有消息
+    const messages = await databases.listDocuments(
+      appwriteConfig.databaseId,
+      appwriteConfig.messageCollectionId,
+      [
+        Query.equal('chatId', chatId),
+        Query.orderDesc('$createdAt'),
+        Query.limit(50)
+      ]
+    );
+    
+    if (!chatSettings || !chatSettings.isEnabled) {
+      return {
+        total: messages.documents.length,
+        hasSettings: false,
+        expired: 0,
+        messages: []
+      };
+    }
+    
+    // 3. 计算保留截止时间
+    const cutoffTime = calculateExpirationTimestamp(chatSettings.duration);
+    
+    if (!cutoffTime) {
+      return {
+        total: messages.documents.length,
+        hasSettings: true,
+        expired: 0,
+        messages: []
+      };
+    }
+    
+    // 4. 分析消息状态
+    const expiredMessages = messages.documents.filter(msg => 
+      msg.$createdAt < cutoffTime && msg.messageType !== 'system_disappearing_message'
+    );
+    const validMessages = messages.documents.filter(msg => 
+      msg.$createdAt >= cutoffTime || msg.messageType === 'system_disappearing_message'
+    );
+    
+    return {
+      total: messages.documents.length,
+      hasSettings: true,
+      settings: chatSettings,
+      cutoffTime,
+      expired: expiredMessages.length,
+      valid: validMessages.length,
+      expiredMessages,
+      validMessages
+    };
+  } catch (error) {
+    throw error;
+  }
+}
+
+// =================================================================================================
+// GROUP CHAT FUNCTIONS
+// =================================================================================================
+
+/**
+ * 创建群组聊天
+ */
+export async function createGroupChat(
+  name: string,
+  participantIds: string[],
+  createdBy: string,
+  avatar?: string
+): Promise<ChatDocument> {
+  try {
+    if (participantIds.length < 2) {
+      throw new Error('Group chat must have at least 2 participants besides the creator');
+    }
+
+    // 确保创建者也在参与者列表中
+    const allParticipants = Array.from(new Set([createdBy, ...participantIds]));
+    
+    // 创建群组聊天，只使用数据库schema支持的字段
+    const groupChat = await databases.createDocument(
+      appwriteConfig.databaseId,
+      appwriteConfig.chatCollectionId,
+      ID.unique(),
+      {
+        participants: allParticipants,
+        lastMessage: `群聊 "${name}" 已创建`,
+        lastMessageTime: new Date().toISOString(),
+      },
+      [
+        Permission.read(Role.users()),
+        Permission.update(Role.users()),
+        Permission.delete(Role.users()),
+      ]
+    );
+
+    // 发送群组创建的系统消息，包含群组元数据
+    await databases.createDocument(
+      appwriteConfig.databaseId,
+      appwriteConfig.messageCollectionId,
+      ID.unique(),
+      {
+        chatId: groupChat.$id,
+        sender: 'system',
+        content: JSON.stringify({
+          type: 'group_created',
+          groupName: name || `群聊(${allParticipants.length})`,
+          avatar: avatar || null,
+          admins: [createdBy],
+          createdBy,
+          displayText: `群聊 "${name}" 已创建，可以开始聊天了。`
+        }),
+        messageType: 'system_group_created',
+      },
+      [
+        Permission.read(Role.users()),
+        Permission.update(Role.users()),
+        Permission.delete(Role.users()),
+      ]
+    );
+
+    // 返回带有群组信息的聊天文档
+    return {
+      ...groupChat,
+      isGroup: true,
+      name: name || `群聊(${allParticipants.length})`,
+      avatar: avatar || null,
+      admins: [createdBy],
+      createdBy,
+    } as ChatDocument;
+  } catch (error) {
+    throw error;
+  }
+}
+
+/**
+ * 更新群组信息（仅管理员可操作）
+ */
+export async function updateGroupInfo(
+  groupId: string,
+  userId: string,
+  updates: { name?: string; avatar?: string }
+): Promise<ChatDocument> {
+  try {
+    // 获取群组详细信息
+    const { group } = await getGroupChatDetails(groupId);
+
+    // 检查用户是否为管理员
+    if (!group.admins?.includes(userId)) {
+      throw new Error('Only admins can update group information');
+    }
+
+    // 更新系统消息中的群组元数据
+    try {
+      const systemMessages = await databases.listDocuments(
+        appwriteConfig.databaseId,
+        appwriteConfig.messageCollectionId,
+        [
+          Query.equal('chatId', groupId),
+          Query.equal('messageType', 'system_group_created'),
+          Query.limit(1)
+        ]
+      );
+      
+      if (systemMessages.documents.length > 0) {
+        const systemMessage = systemMessages.documents[0];
+        try {
+          const metadata = JSON.parse(systemMessage.content);
+          const updatedMetadata = {
+            ...metadata,
+            groupName: updates.name || metadata.groupName,
+            avatar: updates.avatar !== undefined ? updates.avatar : metadata.avatar,
+          };
+          
+          await databases.updateDocument(
+            appwriteConfig.databaseId,
+            appwriteConfig.messageCollectionId,
+            systemMessage.$id,
+            {
+              content: JSON.stringify(updatedMetadata)
+            }
+          );
+        } catch (e) {
+          // 解析或更新失败
+        }
+      }
+    } catch (e) {
+      // 获取或更新系统消息失败
+    }
+
+    // 更新聊天的lastMessage以反映更改
+    const lastMessage = updates.name 
+      ? `群聊名称已更改为 "${updates.name}"`
+      : '群聊信息已更新';
+      
+    await databases.updateDocument(
+      appwriteConfig.databaseId,
+      appwriteConfig.chatCollectionId,
+      groupId,
+      {
+        lastMessage,
+        lastMessageTime: new Date().toISOString()
+      }
+    );
+
+    // 返回更新后的群组信息
+    return {
+      ...group,
+      name: updates.name || group.name,
+      avatar: updates.avatar !== undefined ? updates.avatar : group.avatar,
+    } as ChatDocument;
+  } catch (error) {
+    throw error;
+  }
+}
+
+/**
+ * 添加成员到群组
+ */
+export async function addMembersToGroup(
+  groupId: string,
+  newMemberIds: string[],
+  addedBy: string
+): Promise<ChatDocument> {
+  try {
+    const group = await databases.getDocument(
+      appwriteConfig.databaseId,
+      appwriteConfig.chatCollectionId,
+      groupId
+    );
+
+    const currentParticipants = group.participants || [];
+    const updatedParticipants = Array.from(new Set([...currentParticipants, ...newMemberIds]));
+
+    const updatedGroup = await databases.updateDocument(
+      appwriteConfig.databaseId,
+      appwriteConfig.chatCollectionId,
+      groupId,
+      {
+        participants: updatedParticipants,
+        lastMessage: '有新成员加入群聊',
+        lastMessageTime: new Date().toISOString()
+      }
+    );
+
+    // 为每个新成员发送系统消息
+    for (const memberId of newMemberIds) {
+      if (!currentParticipants.includes(memberId)) {
+        const newMember = await getUserById(memberId);
+        const adder = await getUserById(addedBy);
+        
+        if (newMember && adder) {
+          await databases.createDocument(
+            appwriteConfig.databaseId,
+            appwriteConfig.messageCollectionId,
+            ID.unique(),
+            {
+              chatId: groupId,
+              sender: 'system',
+              content: `${adder.name} 邀请 ${newMember.name} 加入了群聊`,
+              messageType: 'system_member_added',
+            },
+            [
+              Permission.read(Role.users()),
+              Permission.update(Role.users()),
+              Permission.delete(Role.users()),
+            ]
+          );
+        }
+      }
+    }
+
+    // 获取完整的群组信息并返回
+    const { group: fullGroup } = await getGroupChatDetails(groupId);
+    return fullGroup;
+  } catch (error) {
+    throw error;
+  }
+}
+
+/**
+ * 从群组中移除成员（仅管理员可操作）
+ */
+export async function removeMemberFromGroup(
+  groupId: string,
+  memberToRemove: string,
+  removedBy: string
+): Promise<ChatDocument> {
+  try {
+    // 获取群组详细信息
+    const { group } = await getGroupChatDetails(groupId);
+
+    // 检查操作者是否为管理员
+    if (!group.admins?.includes(removedBy)) {
+      throw new Error('Only admins can remove members');
+    }
+
+    // 不能移除创建者
+    if (memberToRemove === group.createdBy) {
+      throw new Error('Cannot remove the group creator');
+    }
+
+    const updatedParticipants = group.participants.filter((id: string) => id !== memberToRemove);
+
+    // 更新参与者列表
+    await databases.updateDocument(
+      appwriteConfig.databaseId,
+      appwriteConfig.chatCollectionId,
+      groupId,
+      {
+        participants: updatedParticipants,
+        lastMessage: '有成员离开群聊',
+        lastMessageTime: new Date().toISOString()
+      }
+    );
+
+    // 如果被移除的成员是管理员，需要更新系统消息中的管理员列表
+    if (group.admins?.includes(memberToRemove)) {
+      const updatedAdmins = group.admins.filter((id: string) => id !== memberToRemove);
+      
+      try {
+        const systemMessages = await databases.listDocuments(
+          appwriteConfig.databaseId,
+          appwriteConfig.messageCollectionId,
+          [
+            Query.equal('chatId', groupId),
+            Query.equal('messageType', 'system_group_created'),
+            Query.limit(1)
+          ]
+        );
+        
+        if (systemMessages.documents.length > 0) {
+          const systemMessage = systemMessages.documents[0];
+          try {
+            const metadata = JSON.parse(systemMessage.content);
+            const updatedMetadata = {
+              ...metadata,
+              admins: updatedAdmins,
+            };
+            
+            await databases.updateDocument(
+              appwriteConfig.databaseId,
+              appwriteConfig.messageCollectionId,
+              systemMessage.$id,
+              {
+                content: JSON.stringify(updatedMetadata)
+              }
+            );
+          } catch (e) {
+            // 解析或更新失败
+          }
+        }
+      } catch (e) {
+        // 获取或更新系统消息失败
+      }
+    }
+
+    // 发送系统消息
+    const removedMember = await getUserById(memberToRemove);
+    const remover = await getUserById(removedBy);
+    
+    if (removedMember && remover) {
+      await databases.createDocument(
+        appwriteConfig.databaseId,
+        appwriteConfig.messageCollectionId,
+        ID.unique(),
+        {
+          chatId: groupId,
+          sender: 'system',
+          content: `${remover.name} 将 ${removedMember.name} 移出了群聊`,
+          messageType: 'system_member_removed',
+        },
+        [
+          Permission.read(Role.users()),
+          Permission.update(Role.users()),
+          Permission.delete(Role.users()),
+        ]
+      );
+    }
+
+    // 获取更新后的群组信息并返回
+    const { group: updatedGroup } = await getGroupChatDetails(groupId);
+    return updatedGroup;
+  } catch (error) {
+    throw error;
+  }
+}
+
+/**
+ * 离开群组
+ */
+export async function leaveGroup(groupId: string, userId: string): Promise<void> {
+  try {
+    // 获取群组详细信息
+    const { group } = await getGroupChatDetails(groupId);
+
+    // 如果是创建者离开，需要转让管理员权限
+    if (group.createdBy === userId) {
+      const otherAdmins = group.admins?.filter((id: string) => id !== userId) || [];
+      const otherParticipants = group.participants.filter((id: string) => id !== userId);
+      
+      if (otherParticipants.length === 0) {
+        // 如果没有其他成员，删除群组
+        await databases.deleteDocument(
+          appwriteConfig.databaseId,
+          appwriteConfig.chatCollectionId,
+          groupId
+        );
+        return;
+      }
+      
+      // 如果没有其他管理员，将第一个成员设为管理员
+      if (otherAdmins.length === 0 && otherParticipants.length > 0) {
+        otherAdmins.push(otherParticipants[0]);
+      }
+
+      // 更新参与者列表
+      await databases.updateDocument(
+        appwriteConfig.databaseId,
+        appwriteConfig.chatCollectionId,
+        groupId,
+        {
+          participants: otherParticipants,
+          lastMessage: '群主离开了群聊',
+          lastMessageTime: new Date().toISOString()
+        }
+      );
+
+      // 更新系统消息中的管理员和创建者信息
+      try {
+        const systemMessages = await databases.listDocuments(
+          appwriteConfig.databaseId,
+          appwriteConfig.messageCollectionId,
+          [
+            Query.equal('chatId', groupId),
+            Query.equal('messageType', 'system_group_created'),
+            Query.limit(1)
+          ]
+        );
+        
+        if (systemMessages.documents.length > 0) {
+          const systemMessage = systemMessages.documents[0];
+          try {
+            const metadata = JSON.parse(systemMessage.content);
+            const updatedMetadata = {
+              ...metadata,
+              admins: otherAdmins,
+              createdBy: otherAdmins[0] || otherParticipants[0]
+            };
+            
+            await databases.updateDocument(
+              appwriteConfig.databaseId,
+              appwriteConfig.messageCollectionId,
+              systemMessage.$id,
+              {
+                content: JSON.stringify(updatedMetadata)
+              }
+            );
+          } catch (e) {
+            // 解析或更新失败
+          }
+        }
+      } catch (e) {
+        // 获取或更新系统消息失败
+      }
+    } else {
+      // 普通成员离开
+      const updatedParticipants = group.participants.filter((id: string) => id !== userId);
+
+      // 更新参与者列表
+      await databases.updateDocument(
+        appwriteConfig.databaseId,
+        appwriteConfig.chatCollectionId,
+        groupId,
+        {
+          participants: updatedParticipants,
+          lastMessage: '有成员离开群聊',
+          lastMessageTime: new Date().toISOString()
+        }
+      );
+
+      // 如果离开的成员是管理员，需要更新系统消息中的管理员列表
+      if (group.admins?.includes(userId)) {
+        const updatedAdmins = group.admins.filter((id: string) => id !== userId);
+        
+        try {
+          const systemMessages = await databases.listDocuments(
+            appwriteConfig.databaseId,
+            appwriteConfig.messageCollectionId,
+            [
+              Query.equal('chatId', groupId),
+              Query.equal('messageType', 'system_group_created'),
+              Query.limit(1)
+            ]
+          );
+          
+          if (systemMessages.documents.length > 0) {
+            const systemMessage = systemMessages.documents[0];
+            try {
+              const metadata = JSON.parse(systemMessage.content);
+              const updatedMetadata = {
+                ...metadata,
+                admins: updatedAdmins,
+              };
+              
+              await databases.updateDocument(
+                appwriteConfig.databaseId,
+                appwriteConfig.messageCollectionId,
+                systemMessage.$id,
+                {
+                  content: JSON.stringify(updatedMetadata)
+                }
+              );
+            } catch (e) {
+              // 解析或更新失败
+            }
+          }
+        } catch (e) {
+          // 获取或更新系统消息失败
+        }
+      }
+    }
+
+    // 发送系统消息
+    const leavingUser = await getUserById(userId);
+    if (leavingUser) {
+      await databases.createDocument(
+        appwriteConfig.databaseId,
+        appwriteConfig.messageCollectionId,
+        ID.unique(),
+        {
+          chatId: groupId,
+          sender: 'system',
+          content: `${leavingUser.name} 离开了群聊`,
+          messageType: 'system_member_left',
+        },
+        [
+          Permission.read(Role.users()),
+          Permission.update(Role.users()),
+          Permission.delete(Role.users()),
+        ]
+      );
+    }
+  } catch (error) {
+    throw error;
+  }
+}
+
+/**
+ * 获取群组详细信息包括成员
+ */
+export async function getGroupChatDetails(groupId: string): Promise<{
+  group: ChatDocument;
+  members: (UserDocument & { role: 'admin' | 'member' })[];
+}> {
+  try {
+    const group = await databases.getDocument(
+      appwriteConfig.databaseId,
+      appwriteConfig.chatCollectionId,
+      groupId
+    ) as ChatDocument;
+
+    // 通过参与者数量判断是否为群组聊天
+    const isGroupChat = group.participants?.length > 2;
+    if (!isGroupChat) {
+      throw new Error('This is not a group chat');
+    }
+
+    // 从系统消息中获取群组元数据
+    let groupName = `群聊(${group.participants?.length || 0})`;
+    let groupAvatar = null;
+    let admins: string[] = [];
+    let createdBy = '';
+    
+    try {
+      const systemMessages = await databases.listDocuments(
+        appwriteConfig.databaseId,
+        appwriteConfig.messageCollectionId,
+        [
+          Query.equal('chatId', groupId),
+          Query.equal('messageType', 'system_group_created'),
+          Query.limit(1)
+        ]
+      );
+      
+      if (systemMessages.documents.length > 0) {
+        const systemMessage = systemMessages.documents[0];
+        try {
+          const metadata = JSON.parse(systemMessage.content);
+          groupName = metadata.groupName || groupName;
+          groupAvatar = metadata.avatar;
+          admins = metadata.admins || [];
+          createdBy = metadata.createdBy || '';
+        } catch (e) {
+          // 解析失败，使用默认值
+        }
+      }
+    } catch (e) {
+      // 获取系统消息失败，使用默认值
+    }
+
+    // 构建完整的群组信息
+    const fullGroup = {
+      ...group,
+      isGroup: true,
+      name: groupName,
+      avatar: groupAvatar,
+      admins,
+      createdBy,
+    } as ChatDocument;
+
+    const memberPromises = group.participants.map(async (userId: string) => {
+      const user = await getUserById(userId);
+      if (user) {
+        return {
+          ...user,
+          role: admins.includes(userId) ? 'admin' as const : 'member' as const
+        };
+      }
+      return null;
+    });
+
+    const members = (await Promise.all(memberPromises)).filter(Boolean) as (UserDocument & { role: 'admin' | 'member' })[];
+
+    return { group: fullGroup, members };
+  } catch (error) {
+    throw error;
+  }
+}
+
+/**
+ * 更新群组消息定时清理设置（仅管理员可操作）
+ */
+export async function updateGroupDisappearingSettings(
+  groupId: string, 
+  duration: DisappearingMessageDuration, 
+  userId: string
+): Promise<IDisappearingMessageSettings> {
+  try {
+    // 获取群组详细信息
+    const { group } = await getGroupChatDetails(groupId);
+
+    // 检查用户是否为管理员
+    if (!group.admins?.includes(userId)) {
+      throw new Error('Only admins can change disappearing message settings');
+    }
+
+    const settings: IDisappearingMessageSettings = {
+      chatId: groupId,
+      duration,
+      enabledBy: userId,
+      enabledAt: new Date().toISOString(),
+      isEnabled: duration !== 'off'
+    };
+    
+    await databases.updateDocument(
+      appwriteConfig.databaseId,
+      appwriteConfig.chatCollectionId,
+      groupId,
+      {
+        disappearingMessages: JSON.stringify(settings),
+        lastMessage: '消息定时清理设置已更新',
+        lastMessageTime: new Date().toISOString()
+      }
+    );
+    
+    // 发送系统通知消息
+    await sendGroupDisappearingMessageNotification(groupId, userId, duration);
+    
+    return settings;
+  } catch (error) {
+    throw error;
+  }
+}
+
+/**
+ * 发送群组消息定时清理设置变更的系统通知
+ */
+export async function sendGroupDisappearingMessageNotification(
+  groupId: string, 
+  userId: string, 
+  duration: DisappearingMessageDuration
+): Promise<void> {
+  try {
+    const user = await getUserById(userId);
+    if (!user) return;
+    
+    let content: string;
+    if (duration === 'off') {
+      content = `管理员 ${user.name} 已关闭消息定时清理。`;
+    } else {
+      const durationText = {
+        '1day': '1天',
+        '3days': '3天', 
+        '7days': '7天',
+        '30days': '30天'
+      }[duration] || duration;
+      
+      content = `管理员 ${user.name} 已将消息保留时间设置为 ${durationText}。`;
+    }
+    
+    await databases.createDocument(
+      appwriteConfig.databaseId,
+      appwriteConfig.messageCollectionId,
+      ID.unique(),
+      {
+        chatId: groupId,
+        sender: 'system',
+        content,
+        messageType: 'system_disappearing_message',
+        expirationTimestamp: null, // 系统消息不过期
+      },
+      [
+        Permission.read(Role.users()),
+        Permission.update(Role.users()),
+        Permission.delete(Role.users()),
+      ]
+    );
+  } catch (error) {
+    // 静默处理错误
+  }
+}
+

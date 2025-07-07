@@ -8,6 +8,7 @@ import { useSignOutAccount } from '@/lib/react-query/queriesAndMutations';
 import { getUnreadNotificationsCount, markNotificationsAsRead } from '@/lib/appwrite/api';
 import { useNotificationContext } from '@/context/NotificationContext';
 import { useChatContext } from '@/context/ChatContext';
+import { getMinistryName } from '@/lib/utils';
 
 const LeftSidebar = () => {
     const { user, setUser, setIsAuthenticated } = useUserContext();
@@ -82,7 +83,7 @@ const LeftSidebar = () => {
                             <div className='flex flex-col'>
                                 <p className='text-charcoal text-l font-bold'>{user.name}</p>
                                 <p className='small-regular text-warm-gray'>
-                                    {user.ministry ? `📋 ${user.ministry}` : '📋 未分配事工'}
+                                    📋 {getMinistryName(user.ministry)}
                                 </p>
                             </div>
                         </Link>

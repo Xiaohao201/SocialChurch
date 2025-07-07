@@ -2,6 +2,7 @@ import { useState } from 'react';
 import { IUserWithFriendship } from '@/types';
 import { Button } from '@/components/ui/button';
 import { onlineStatusService } from '@/lib/webrtc/onlineStatusService';
+import { getMinistryName } from '@/lib/utils';
 
 interface UserPreviewCardProps {
   user: IUserWithFriendship;
@@ -54,7 +55,7 @@ const UserPreviewCard = ({
             {user.name}
           </h4>
           <p className="text-light-4 text-xs truncate">
-            {user.ministry || '未分配事工'}
+            {getMinistryName(user.ministry)}
           </p>
         </div>
         <Button
@@ -111,7 +112,7 @@ const UserPreviewCard = ({
             </span>
           </div>
           <p className="text-light-3 text-xs truncate">
-            {user.ministry ? `📋 ${user.ministry}` : '📋 未分配事工'}
+            📋 {getMinistryName(user.ministry)}
           </p>
           {user.gender && (
             <p className="text-light-4 text-xs">
@@ -174,7 +175,7 @@ const UserPreviewCard = ({
             />
             <div>
               <h3 className="text-light-1 font-semibold">{user.name}</h3>
-              <p className="text-light-3 text-sm">{user.ministry || '未分配事工'}</p>
+              <p className="text-light-3 text-sm">{getMinistryName(user.ministry)}</p>
               <p className={`text-xs ${status.textColor}`}>{status.text}</p>
             </div>
           </div>

@@ -169,3 +169,68 @@ export type IUpdatePost = {
   location: string;
   tags: string;
 };
+
+// 消息定时清理相关类型
+export type DisappearingMessageDuration = 'off' | '1day' | '3days' | '7days' | '30days';
+
+export interface IDisappearingMessageSettings {
+  chatId: string;
+  duration: DisappearingMessageDuration;
+  enabledBy: string;
+  enabledAt: string;
+  isEnabled: boolean;
+}
+
+export interface IChatWithDisappearing {
+  $id: string;
+  participants: string[];
+  lastMessage?: string;
+  lastMessageTime?: string;
+  disappearingMessages?: IDisappearingMessageSettings;
+}
+
+export interface IMessageWithExpiration {
+  $id: string;
+  chatId: string;
+  sender: string;
+  content: string;
+  messageType: string;
+  fileData?: string;
+  voiceData?: string;
+  expirationTimestamp?: string;
+  $createdAt: string;
+}
+
+export interface IGroupChat {
+  $id: string;
+  name: string;
+  avatar?: string;
+  participants: string[];
+  admins: string[];
+  createdBy: string;
+  isGroup: true;
+  lastMessage?: string;
+  lastMessageTime?: string;
+  disappearingMessages?: IDisappearingMessageSettings;
+  $createdAt: string;
+  $updatedAt: string;
+}
+
+export interface IGroupMember {
+  $id: string;
+  userId: string;
+  groupId: string;
+  role: 'admin' | 'member';
+  joinedAt: string;
+}
+
+export interface IGroupChatWithMembers extends IGroupChat {
+  members: (IUser & { role: 'admin' | 'member' })[];
+}
+
+export interface ICreateGroupRequest {
+  name: string;
+  avatar?: string;
+  participantIds: string[];
+  createdBy: string;
+}

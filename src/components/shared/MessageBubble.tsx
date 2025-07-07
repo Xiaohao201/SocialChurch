@@ -20,7 +20,6 @@ interface MessageBubbleProps {
   senderAvatar?: string;
   senderName?: string;
   onClick?: () => void;
-  onContextMenu?: (event: React.MouseEvent) => void;
 }
 
 const MessageBubble: React.FC<MessageBubbleProps> = ({
@@ -32,8 +31,7 @@ const MessageBubble: React.FC<MessageBubbleProps> = ({
   isLastInGroup = true,
   senderAvatar,
   senderName,
-  onClick,
-  onContextMenu
+  onClick
 }) => {
   // 获取消息状态图标
   const getStatusIcon = (status: string) => {
@@ -81,7 +79,6 @@ const MessageBubble: React.FC<MessageBubbleProps> = ({
 
   return (
     <div
-      onContextMenu={onContextMenu}
       className={`flex items-end gap-2 ${isFirstInGroup ? 'mt-2' : 'mt-0.5'} ${
         isMe ? "ml-auto flex-row-reverse" : "mr-auto"
       } ${isLastInGroup ? 'mb-1.5' : 'mb-0.5'} max-w-[75%]`}

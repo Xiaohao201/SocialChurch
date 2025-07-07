@@ -4,6 +4,7 @@ import { Link, useParams } from 'react-router-dom';
 import { useState, useEffect, useRef } from 'react';
 import { getUserById, updateUser, uploadFile, getFilePreview, getUserAvatarUrl } from '@/lib/appwrite/api';
 import { useToast } from '@/components/ui/use-toast';
+import { getMinistryName } from '@/lib/utils';
 import Loader from '@/components/shared/Loader';
 import { 
   Calendar, 
@@ -57,7 +58,7 @@ const Profile = () => {
           setProfileUser(processedUser);
           setEditValues({
             name: currentUser.name || '',
-            ministry: currentUser.ministry || '',
+            ministry: getMinistryName(currentUser.ministry),
             dateOfFaith: currentUser.dateOfFaith ? new Date(currentUser.dateOfFaith).toISOString().split('T')[0] : '',
             faithTestimony: currentUser.faithTestimony || '',
             gender: currentUser.gender || 'unknown'
@@ -137,11 +138,11 @@ const Profile = () => {
       console.log('获取文件预览URL:', imageUrl);
       
       // 更新用户数据库记录，保存完整的预览URL
-      await updateUser(currentUser.$id, { imageUrl: imageUrl });
+      await updateUser(currentUser.$id, { imageUrl: imageUrl.toString() });
       console.log('用户数据库记录更新成功，保存的预览URL:', imageUrl);
       
       // 更新本地状态
-      setProfileUser((prev: any) => ({ ...prev, imageUrl }));
+      setProfileUser((prev: any) => ({ ...prev, imageUrl: imageUrl.toString() }));
       
       // 同时更新AuthContext中的用户信息，保存文件ID用于内部处理
       if (isOwnProfile) {
@@ -190,7 +191,7 @@ const Profile = () => {
     // 恢复原值
     setEditValues({
       name: profileUser.name || '',
-      ministry: profileUser.ministry || '',
+      ministry: getMinistryName(profileUser.ministry),
       dateOfFaith: profileUser.dateOfFaith ? new Date(profileUser.dateOfFaith).toISOString().split('T')[0] : '',
       faithTestimony: profileUser.faithTestimony || '',
       gender: profileUser.gender || 'unknown'
@@ -436,7 +437,7 @@ const Profile = () => {
                   } font-opensans profile-text`}
                   onClick={() => handleEditStart('ministry')}
                 >
-                  {profileUser.ministry || (isOwnProfile ? '设置事工' : '暂无事工')}
+                  {getMinistryName(profileUser.ministry) === '未分配事工' ? (isOwnProfile ? '设置事工' : '暂无事工') : getMinistryName(profileUser.ministry)}
                 </span>
               )}
             </div>

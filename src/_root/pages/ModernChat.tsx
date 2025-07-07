@@ -6,17 +6,18 @@ import ChatHeader from '@/components/chat/ChatHeader';
 import ChatInput from '@/components/chat/ChatInput';
 import MessageBubble from '@/components/shared/MessageBubble';
 import Loader from '@/components/shared/Loader';
-import { getUserChats, getChatMessages, sendMessage, uploadFile, getFilePreview, getUserOnlineStatus, searchUsers, getOrCreateChat, deleteMessage, getUserById, debugUserChats, getChatStorageInfo, fixChatDataSync, advancedChatDiagnosis, recreateMissingChats } from '@/lib/appwrite/api';
+import { getUserChats, getChatMessages, sendMessage, uploadFile, getFilePreview, getUserOnlineStatus, getOrCreateChat, deleteMessage, getUserById, uploadVoiceMessage, getChatDisappearingSettings, updateChatDisappearingSettings, updateGroupDisappearingSettings } from '@/lib/appwrite/api';
 import { useToast } from '@/components/ui/use-toast';
 import { AttachmentType } from '@/components/chat/AttachmentMenu';
-import ImprovedVoiceCallModal from '@/components/chat/ImprovedVoiceCallModal';
-import VideoCallModal from '@/components/chat/VideoCallModal';
+
 import UserProfileModal from '@/components/shared/UserProfileModal';
+import ChatInfoModal from '@/components/shared/ChatInfoModal';
+import GroupInfoModal from '@/components/shared/GroupInfoModal';
+import GroupCallMemberSelector from '@/components/shared/GroupCallMemberSelector';
+import SystemMessage from '@/components/shared/SystemMessage';
 import FileMessage from '@/components/shared/FileMessage';
 import { client, appwriteConfig } from '@/lib/appwrite/config';
-import useDebounce from "@/hooks/useDebounce";
-import { Button } from "@/components/ui/button";
-import { Input } from "@/components/ui/input";
+
 import FileAggregation from '@/components/shared/FileAggregation';
 import { downloadMultipleFiles } from '@/utils/downloadUtils';
 import AudioPlayer from '@/components/shared/AudioPlayer';
@@ -25,31 +26,9 @@ import { useSearchParams } from 'react-router-dom';
 import { useChatContext } from '@/context/ChatContext';
 import { Models } from 'appwrite';
 import { UIChat } from '@/lib/appwrite/api';
-
-// 聊天功能验证工具
-const validateChatFeatures = (user: any, chats: any[], currentChat: any, globalCurrentChat: any) => {
-  const results = {
-    chatListLoaded: chats.length > 0,
-    chatSelected: !!currentChat,
-    globalStateSync: !!globalCurrentChat,
-    stateConsistency: currentChat?.$id === globalCurrentChat?.id,
-    userAuthenticated: !!user?.$id,
-    chatPrivacy: currentChat ? 'Private chat enabled - only participants can access' : 'No active chat',
-    features: {
-      leftSidebar: '✅ 联系人列表已实现',
-      rightPanel: '✅ 聊天窗口已实现', 
-      highlighting: currentChat ? '✅ 当前聊天已高亮显示' : '⏳ 等待选择聊天',
-      messageHistory: '✅ 聊天记录保存功能已启用',
-      privacy: '✅ 私密聊天保护已启用'
-    }
-  };
-  
-  if (process.env.NODE_ENV === 'development') {
-    console.log('🔍 聊天功能验证结果:', results);
-  }
-  
-  return results;
-};
+import { DisappearingMessageDuration } from '@/types';
+import { messageCleanupService } from '@/utils/messageCleanup';
+import VoiceMessage from '@/components/chat/VoiceMessage';
 
 // Helper functions for message display
 const formatMessageDate = (timestamp: string | Date) => {
@@ -87,6 +66,117 @@ const isEmojiOnly = (text: string) => {
   return emojiRegex.test(text);
 };
 
+// Format message content for preview
+const formatMessageForPreview = (message: any) => {
+  if (!message) return 'No recent messages';
+  
+  const content = message.content || '';
+  const messageType = message.messageType || message.type || 'text';
+  
+  // Handle voice messages
+  if (messageType === 'voice') {
+    return '🎤 语音消息';
+  }
+  
+  // Handle file messages
+  if (messageType === 'file') {
+    const fileName = content.toLowerCase();
+    
+    // Check file type by extension
+    if (fileName.match(/\.(jpg|jpeg|png|gif|webp|svg|bmp|ico)$/)) {
+      return '📷 Photo';
+    } else if (fileName.match(/\.(mp4|avi|mov|wmv|flv|webm|mkv|m4v)$/)) {
+      return '🎥 Video';
+    } else if (fileName.match(/\.(mp3|wav|m4a|ogg|flac|aac|wma)$/)) {
+      return '🎵 Audio';
+    } else if (fileName.match(/\.(pdf)$/)) {
+      return '📄 PDF';
+    } else if (fileName.match(/\.(doc|docx|txt|rtf)$/)) {
+      return '📝 Document';
+    } else if (fileName.match(/\.(xls|xlsx|csv)$/)) {
+      return '📊 Spreadsheet';
+    } else if (fileName.match(/\.(ppt|pptx)$/)) {
+      return '📈 Presentation';
+    } else if (fileName.match(/\.(zip|rar|7z|tar|gz)$/)) {
+      return '📦 Archive';
+    } else {
+      return '📎 File';
+    }
+  }
+  
+  // Handle placeholder/corrupted content - if content is just "text", treat as no meaningful message
+  if (content.trim() === 'text') {
+    return 'Start a conversation';
+  }
+  
+  // Handle text messages
+  if (isEmojiOnly(content)) {
+    return content;
+  }
+  
+  if (containsUrl(content)) {
+    return '🔗 Shared a link';
+  }
+  
+  // Regular text message - truncate if too long
+  const maxLength = 45;
+  const truncatedMessage = content.length > maxLength 
+    ? content.substring(0, maxLength) + '...' 
+    : content;
+  
+  return truncatedMessage || 'No recent messages';
+};
+
+// Format last message preview for conversation list (fallback for database lastMessage)
+const formatLastMessagePreview = (lastMessage: string) => {
+  if (!lastMessage || lastMessage === 'text') {
+    return 'No recent messages';
+  }
+  
+  // Check if the message starts with "Attachment:" (from backend)
+  if (lastMessage.startsWith('Attachment:')) {
+    const fileName = lastMessage.replace('Attachment: ', '').toLowerCase();
+    
+    // Check file type by extension
+    if (fileName.match(/\.(jpg|jpeg|png|gif|webp|svg|bmp|ico)$/)) {
+      return '📷 Photo';
+    } else if (fileName.match(/\.(mp4|avi|mov|wmv|flv|webm|mkv|m4v)$/)) {
+      return '🎥 Video';
+    } else if (fileName.match(/\.(mp3|wav|m4a|ogg|flac|aac|wma)$/)) {
+      return '🎵 Audio';
+    } else if (fileName.match(/\.(pdf)$/)) {
+      return '📄 PDF';
+    } else if (fileName.match(/\.(doc|docx|txt|rtf)$/)) {
+      return '📝 Document';
+    } else if (fileName.match(/\.(xls|xlsx|csv)$/)) {
+      return '📊 Spreadsheet';
+    } else if (fileName.match(/\.(ppt|pptx)$/)) {
+      return '📈 Presentation';
+    } else if (fileName.match(/\.(zip|rar|7z|tar|gz)$/)) {
+      return '📦 Archive';
+    } else {
+      return '📎 File';
+    }
+  }
+  
+  // Handle text messages
+  if (isEmojiOnly(lastMessage)) {
+    return lastMessage;
+  }
+  
+  if (containsUrl(lastMessage)) {
+    return '🔗 Shared a link';
+  }
+  
+  // Regular text message - truncate if too long
+  const maxLength = 45;
+  const truncatedMessage = lastMessage.length > maxLength 
+    ? lastMessage.substring(0, maxLength) + '...' 
+    : lastMessage;
+  
+  return truncatedMessage;
+};
+
 const isAudioFile = (fileName: string) => {
   return /\.(mp3|wav|m4a|ogg|flac|aac)$/i.test(fileName);
 };
@@ -113,15 +203,12 @@ const ModernChat: React.FC = () => {
   } = useChatContext();
 
   const [search, setSearch] = useState('');
-  const debouncedSearch = useDebounce(search, 500);
-
-  const [searchResults, setSearchResults] = useState<any[]>([]);
-  const [isSearching, setIsSearching] = useState(false);
   
   const [chats, setChats] = useState<UIChat[]>([]);
   const [onlineStatusMap, setOnlineStatusMap] = useState<Map<string, boolean>>(new Map());
   const [threads, setThreads] = useState<MessageThread[]>([]);
   const [loadingThreads, setLoadingThreads] = useState(true);
+  const [chatLastMessages, setChatLastMessages] = useState<Map<string, any>>(new Map());
 
   const [currentChat, setCurrentChat] = useState<any | null>(null);
   const [messages, setMessages] = useState<any[]>([]);
@@ -132,15 +219,15 @@ const ModernChat: React.FC = () => {
   // 新增：聊天保存状态指示
   const [chatSaveStatus, setChatSaveStatus] = useState<'idle' | 'saving' | 'saved' | 'error'>('idle');
 
-  // 诊断功能状态
-  const [showDiagnosis, setShowDiagnosis] = useState(false);
-  const [diagnosisData, setDiagnosisData] = useState<any>(null);
-
-  // Context menu for messages
-  const [contextMenu, setContextMenu] = useState<{ x: number; y: number; message: any } | null>(null);
-
   // Voice / Video / Info modal states
   const [showUserProfile, setShowUserProfile] = useState(false);
+  const [showChatInfo, setShowChatInfo] = useState(false);
+  const [showGroupInfo, setShowGroupInfo] = useState(false);
+  const [showGroupCallSelector, setShowGroupCallSelector] = useState(false);
+  const [groupCallType, setGroupCallType] = useState<'audio' | 'video'>('audio');
+  
+  // 消息定时清理相关状态
+  const [currentDisappearingDuration, setCurrentDisappearingDuration] = useState<DisappearingMessageDuration>('off');
 
   // Hidden file input for attachments
   const fileInputRef = useRef<HTMLInputElement | null>(null);
@@ -148,16 +235,54 @@ const ModernChat: React.FC = () => {
   // Ref to bottom of message list for auto-scroll
   const messagesEndRef = useRef<HTMLDivElement | null>(null);
 
+  const isProcessingVoiceRef = useRef(false);
+
+  // 选中聊天 - 移到前面定义
+  const selectChat = useCallback(async (chat: any) => {
+    // Reset unread count for this specific chat
+    const countToReset = unreadCounts[chat.$id] || 0;
+    if (countToReset > 0) {
+      resetChatUnreadCount(countToReset);
+      setUnreadCounts(prev => ({ ...prev, [chat.$id]: 0 }));
+    }
+    
+    // Clear any active search so the full thread list becomes visible again
+    setSearch('');
+
+    // 同时更新本地状态和全局状态
+    setCurrentChat(chat);
+    setGlobalCurrentChat({
+      id: chat.$id,
+      otherUser: {
+        $id: chat.otherUser?.$id,
+        name: chat.otherUser?.name || 'Unknown User',
+        imageUrl: chat.otherUser?.imageUrl,
+      }
+    });
+  }, [unreadCounts, resetChatUnreadCount, setGlobalCurrentChat]);
+
   useEffect(() => {
     // 处理从URL参数启动聊天（支持both 'chat' 和 'with' 参数）
     const friendId = searchParams.get('chat') || searchParams.get('with');
-    if (friendId) {
+    const groupId = searchParams.get('id'); // 群组聊天ID
+    
+    if (groupId) {
+      // 如果是群组聊天，延迟处理直到chats加载完成
+      if (chats.length > 0) {
+        const targetGroup = chats.find(chat => chat.$id === groupId && chat.isGroup);
+        if (targetGroup) {
+          selectChat(targetGroup);
+          // Clean up the URL parameters
+          searchParams.delete('id');
+          setSearchParams(searchParams);
+        }
+      }
+    } else if (friendId) {
       getUserById(friendId).then((friendUser) => {
         if (friendUser) {
           handleSelectUserFromSearch(friendUser);
         }
       }).catch(err => {
-        console.error("Failed to get user by ID for chat:", err);
         toast({ title: "无法打开聊天", description: "找不到指定的用户。", variant: "destructive" });
       });
       // Clean up the URL parameters
@@ -167,7 +292,20 @@ const ModernChat: React.FC = () => {
       searchParams.delete('avatar');
       setSearchParams(searchParams);
     }
-  }, [searchParams, user.$id]);
+  }, [searchParams, user.$id, chats, selectChat]);
+
+  // Effect: 启动消息清理服务
+  useEffect(() => {
+    if (user?.$id) {
+      messageCleanupService.start();
+    }
+
+    return () => {
+      messageCleanupService.stop();
+    };
+  }, [user?.$id]);
+
+
 
   // Real-time subscription for new chats
   useEffect(() => {
@@ -189,34 +327,7 @@ const ModernChat: React.FC = () => {
     };
   }, [user.$id]);
 
-  // Close context menu when clicking outside
-  useEffect(() => {
-    const handleClickOutside = () => {
-      if (contextMenu) {
-        setContextMenu(null);
-      }
-    };
-    window.addEventListener('click', handleClickOutside);
-    return () => {
-      window.removeEventListener('click', handleClickOutside);
-    };
-  }, [contextMenu]);
 
-  // Effect for searching users
-  useEffect(() => {
-    if (debouncedSearch) {
-      setIsSearching(true);
-      searchUsers(debouncedSearch, user.$id)
-        .then((results: any) => {
-          if (results) {
-            setSearchResults(results);
-          }
-        })
-        .finally(() => setIsSearching(false));
-    } else {
-      setSearchResults([]);
-    }
-  }, [debouncedSearch, user.$id]);
 
   // Effect 1: Load chats from cache, then fetch from network
   useEffect(() => {
@@ -228,12 +339,39 @@ const ModernChat: React.FC = () => {
     const loadAndSyncChats = async () => {
       // 1. Load from cache for instant UI
       try {
-        const cachedChats = localStorage.getItem(CHATS_CACHE_KEY);
+        let cachedChats = localStorage.getItem(CHATS_CACHE_KEY);
+        
+        // 如果当前用户没有缓存，尝试通过邮箱恢复
+        if (!cachedChats) {
+          const lastUserEmail = localStorage.getItem('last_user_email');
+          if (lastUserEmail === user.email) {
+            // 查找所有聊天缓存，尝试恢复
+            const allKeys = Object.keys(localStorage);
+            const chatCacheKeys = allKeys.filter(k => k.startsWith('chats_cache_'));
+            
+            for (const key of chatCacheKeys) {
+              try {
+                const data = localStorage.getItem(key);
+                if (data) {
+                  const parsedChats = JSON.parse(data);
+                  if (parsedChats.length > 0) {
+                    localStorage.setItem(CHATS_CACHE_KEY, data);
+                    cachedChats = data;
+                    break;
+                  }
+                }
+              } catch (e) {
+                // 静默处理解析错误
+              }
+            }
+          }
+        }
+        
         if (cachedChats && isMounted) {
           setChats(JSON.parse(cachedChats));
         }
       } catch (error) {
-        console.error("Failed to load chats from cache:", error);
+        // 静默处理加载缓存错误
       }
 
       if (isMounted) {
@@ -247,26 +385,8 @@ const ModernChat: React.FC = () => {
           setChats(freshChats);
           localStorage.setItem(CHATS_CACHE_KEY, JSON.stringify(freshChats));
         }
-
-        // 3. Auto-sync missing chats
-        const syncResult = await recreateMissingChats(user.$id);
-        if (isMounted && syncResult.success && syncResult.createdCount && syncResult.createdCount > 0) {
-          toast({
-            title: "Chats Synced",
-            description: `Successfully restored ${syncResult.createdCount} missing conversations.`,
-          });
-          // Refresh the list one last time
-          const finalChats = await getUserChats(user.$id);
-          if (isMounted) {
-            setChats(finalChats);
-            localStorage.setItem(CHATS_CACHE_KEY, JSON.stringify(finalChats));
-          }
-        }
       } catch (e: any) {
-        console.error("❌ Failed to load or sync chats:", e);
-        if (isMounted) {
-          toast({ title: 'Loading Failed', description: e.message || 'Could not load chat list.', variant: 'destructive' });
-        }
+        toast({ title: 'Loading Failed', description: e.message || 'Could not load chat list.', variant: 'destructive' });
       } finally {
         if (isMounted) {
           setLoadingThreads(false);
@@ -284,7 +404,7 @@ const ModernChat: React.FC = () => {
   // Effect 2: Fetch initial statuses and subscribe to real-time updates
   useEffect(() => {
     const subscriptions: (() => void)[] = [];
-    const peerIds = chats.map(chat => chat.otherUser?.$id).filter(Boolean);
+    const peerIds = chats.map(chat => chat.otherUser?.$id).filter((id): id is string => Boolean(id));
 
     if (peerIds.length === 0) return;
 
@@ -304,7 +424,7 @@ const ModernChat: React.FC = () => {
             return newMap;
         });
       } catch (error) {
-        console.error("Failed to fetch initial online statuses:", error);
+        // 静默处理获取初始在线状态错误
       }
     };
     fetchInitialStatuses();
@@ -326,47 +446,144 @@ const ModernChat: React.FC = () => {
     };
   }, [chats]);
 
-  // 选中聊天
-  const selectChat = useCallback(async (chat: any) => {
-    // Reset unread count for this specific chat
-    const countToReset = unreadCounts[chat.$id] || 0;
-    if (countToReset > 0) {
-      resetChatUnreadCount(countToReset);
-      setUnreadCounts(prev => ({ ...prev, [chat.$id]: 0 }));
+    // Effect: Fetch last messages for each chat
+  useEffect(() => {
+    const fetchLastMessages = async () => {
+      const newLastMessages = new Map();
+      
+      for (const chat of chats) {
+        try {
+          // Fetch more messages to find the last meaningful one
+          const dbMessages = await getChatMessages(chat.$id, 20);
+          
+          if (dbMessages.length > 0) {
+            // Look for the most recent message with meaningful content
+            let meaningfulMessage = null;
+            
+            for (let i = dbMessages.length - 1; i >= 0; i--) {
+              const msg = dbMessages[i];
+              const content = msg.content?.trim();
+              
+              // Skip corrupted/placeholder messages
+              if (content && 
+                  content !== 'text' && 
+                  content !== '' &&
+                  content !== 'undefined' &&
+                  content !== 'null' &&
+                  content.length > 0) {
+                meaningfulMessage = msg;
+                break;
+              }
+            }
+            
+            if (meaningfulMessage) {
+              newLastMessages.set(chat.$id, meaningfulMessage);
+            } else {
+              newLastMessages.set(chat.$id, null);
+            }
+          } else {
+            newLastMessages.set(chat.$id, null);
+          }
+        } catch (error) {
+          newLastMessages.set(chat.$id, null);
+        }
+      }
+      
+      setChatLastMessages(newLastMessages);
+    };
+
+    if (chats.length > 0) {
+      fetchLastMessages();
+    }
+  }, [chats]);
+
+  // Effect: 获取当前聊天的消息定时清理设置
+  useEffect(() => {
+    if (!currentChat?.$id) {
+      setCurrentDisappearingDuration('off');
+      return;
+    }
+
+    const fetchDisappearingSettings = async () => {
+      try {
+        const settings = await getChatDisappearingSettings(currentChat.$id);
+        setCurrentDisappearingDuration(settings?.duration || 'off');
+      } catch (error) {
+        setCurrentDisappearingDuration('off');
+      }
+    };
+
+    fetchDisappearingSettings();
+  }, [currentChat?.$id]);
+
+  // Computed: Filter threads based on search
+  const filteredThreads = useMemo(() => {
+    if (!search.trim()) {
+      return threads;
     }
     
-    // Clear any active search so the full thread list becomes visible again
-    setSearch('');
-    setSearchResults([]);
-
-    // 同时更新本地状态和全局状态
-    setCurrentChat(chat);
-    setGlobalCurrentChat({
-      id: chat.$id,
-      otherUser: {
-        $id: chat.otherUser?.$id,
-        name: chat.otherUser?.name || 'Unknown User',
-        imageUrl: chat.otherUser?.imageUrl,
-      }
-    });
-  }, [unreadCounts, resetChatUnreadCount, setGlobalCurrentChat]);
+    const searchLower = search.toLowerCase();
+    return threads.filter(thread => 
+      thread.name.toLowerCase().includes(searchLower) ||
+      (thread.preview && thread.preview.toLowerCase().includes(searchLower))
+    );
+  }, [threads, search]);
 
   // Effect 3: Derive UI threads from raw data and status map
   useEffect(() => {
-    const mapped: MessageThread[] = chats.map((c: any) => ({
-      id: c.$id,
-      name: c.otherUser?.name || 'Unknown User',
-      avatar: c.otherUser?.imageUrl,
-      preview: c.lastMessage,
-      isOnline: onlineStatusMap.get(c.otherUser?.$id) ?? false,
-      unread: unreadCounts[c.$id] || 0,
-      // 使用全局状态和本地状态的组合来确定选中状态
-      selected: (globalCurrentChat?.id === c.$id) || (currentChat?.$id === c.$id),
-      onClick: () => selectChat(c),
-      otherUser: c.otherUser,
-    }));
+    const mapped: MessageThread[] = chats.map((c: any) => {
+      // 获取消息定时清理设置
+      let disappearingDuration: DisappearingMessageDuration = 'off';
+      if (c.disappearingMessages) {
+        try {
+          const settings = typeof c.disappearingMessages === 'string' 
+            ? JSON.parse(c.disappearingMessages) 
+            : c.disappearingMessages;
+          disappearingDuration = settings.duration || 'off';
+        } catch (error) {
+          // 静默处理解析消失消息设置错误
+        }
+      }
+      // Try to get the actual last message first, fallback to database lastMessage
+      const actualLastMessage = chatLastMessages.get(c.$id);
+      let preview;
+      
+      // Check if we have tried to fetch messages for this chat
+      if (chatLastMessages.has(c.$id)) {
+        // We have tried to fetch - use the result (could be null if no messages)
+        if (actualLastMessage) {
+          preview = formatMessageForPreview(actualLastMessage);
+        } else {
+          // We tried but found no meaningful messages
+          preview = '';
+        }
+      } else {
+        // We haven't tried to fetch yet - use database fallback but avoid "text"
+        if (c.lastMessage && c.lastMessage !== 'text') {
+          preview = formatLastMessagePreview(c.lastMessage);
+        } else {
+          preview = '';
+        }
+      }
+      
+              return {
+          id: c.$id,
+          name: c.isGroup ? (c.name || `群聊(${c.participants?.length || 0})`) : (c.otherUser?.name || 'Unknown User'),
+          avatar: c.isGroup ? (c.avatar || null) : c.otherUser?.imageUrl,
+          preview: preview,
+          isOnline: c.isGroup ? false : (onlineStatusMap.get(c.otherUser?.$id) ?? false),
+          unread: unreadCounts[c.$id] || 0,
+          // 使用全局状态和本地状态的组合来确定选中状态
+          selected: (globalCurrentChat?.id === c.$id) || (currentChat?.$id === c.$id),
+          onClick: () => selectChat(c),
+          otherUser: c.otherUser,
+          disappearingDuration: disappearingDuration,
+          isGroup: c.isGroup,
+          memberCount: c.participants?.length,
+        };
+    });
     setThreads(mapped);
-  }, [chats, onlineStatusMap, currentChat, globalCurrentChat, unreadCounts, selectChat]);
+  }, [chats, onlineStatusMap, currentChat, globalCurrentChat, unreadCounts, selectChat, chatLastMessages]);
 
   // Effect: 同步全局状态到本地状态
   useEffect(() => {
@@ -377,10 +594,7 @@ const ModernChat: React.FC = () => {
         setCurrentChat(matchingChat);
       }
     }
-    
-    // 验证聊天功能状态
-    validateChatFeatures(user, chats, currentChat, globalCurrentChat);
-  }, [globalCurrentChat, currentChat, chats, user]);
+  }, [globalCurrentChat, currentChat, chats]);
 
   // 订阅对方用户的在线状态
   useEffect(() => {
@@ -434,7 +648,6 @@ const ModernChat: React.FC = () => {
         setMessages(normalizedMsgs);
       })
       .catch((e) => {
-        console.error("Failed to fetch messages:", e);
         toast({ title: '加载失败', description: '无法加载消息', variant: 'destructive' });
       })
       .finally(() => {
@@ -458,12 +671,16 @@ const ModernChat: React.FC = () => {
           // Update messages in the open chat window
           setMessages((prev) => [...prev, newMessage]);
 
+          // Update the last message map
+          setChatLastMessages(prev => new Map(prev).set(newMessage.chatId, newMessage));
+
           // Also update the preview text and ordering in the thread list so it reflects in real-time
           setChats(prevChats => {
             const chatToUpdate = prevChats.find(c => c.$id === newMessage.chatId);
             if (!chatToUpdate) return prevChats;
             const otherChats = prevChats.filter(c => c.$id !== newMessage.chatId);
-            const updatedChats = [{ ...chatToUpdate, lastMessage: newMessage.content, lastMessageTime: newMessage.$createdAt }, ...otherChats];
+            const lastMessageText = newMessage.messageType === 'file' ? `Attachment: ${newMessage.content}` : newMessage.content;
+            const updatedChats = [{ ...chatToUpdate, lastMessage: lastMessageText, lastMessageTime: newMessage.$createdAt }, ...otherChats];
             
             // Save the updated list to cache
             try {
@@ -471,7 +688,7 @@ const ModernChat: React.FC = () => {
                 localStorage.setItem(`chats_cache_${user.$id}`, JSON.stringify(updatedChats));
               }
             } catch (error) {
-              console.error("Failed to cache updated chats:", error)
+              // 静默处理缓存更新错误
             }
 
             return updatedChats;
@@ -482,6 +699,9 @@ const ModernChat: React.FC = () => {
           setUnreadCounts(prev => ({ ...prev, [newMessage.chatId]: (prev[newMessage.chatId] || 0) + 1 }));
           incrementTotalUnreadCount();
           
+          // Update the last message map for the inactive chat
+          setChatLastMessages(prev => new Map(prev).set(newMessage.chatId, newMessage));
+          
           // Re-fetch, then update state and cache
           if (user?.$id) {
             const CHATS_CACHE_KEY = `chats_cache_${user.$id}`;
@@ -490,7 +710,7 @@ const ModernChat: React.FC = () => {
               try {
                 localStorage.setItem(CHATS_CACHE_KEY, JSON.stringify(freshChats));
               } catch (error) {
-                console.error("Failed to save chats to cache on real-time update:", error);
+                // 静默处理保存聊天到缓存错误
               }
             });
           }
@@ -506,28 +726,11 @@ const ModernChat: React.FC = () => {
   }, [currentChat, user.$id, incrementTotalUnreadCount]);
 
   const handleSelectUserFromSearch = async (searchedUser: any) => {
-    console.log('--- Chat Initiation Step 1: User Clicked ---');
-    console.log('User object from search result:', {
-      id: searchedUser.$id,
-      name: searchedUser.name,
-      email: searchedUser.email
-    });
-    console.log('Current logged-in user:', { id: user.$id, name: user.name });
-
     setSearch('');
-    setSearchResults([]);
     setLoadingMessages(true);
 
     try {
-        console.log(`--- Chat Initiation Step 2: Calling API ---`);
-        console.log(`Sending my ID (${user.$id}) and their ID (${searchedUser.$id}) to getOrCreateChat.`);
         const chatDoc = await getOrCreateChat(user.$id, searchedUser.$id);
-
-        console.log('--- Chat Initiation Step 3: API Response ---');
-        console.log('Received chat document from API:', {
-          id: chatDoc.$id,
-          participants: chatDoc.participants,
-        });
 
         const newOrUpdatedChatObject = {
             ...chatDoc,
@@ -556,7 +759,6 @@ const ModernChat: React.FC = () => {
 
     } catch (error) {
         toast({ title: "开启聊天失败", description: "无法创建或获取聊天。", variant: "destructive" });
-        console.error("Failed to start chat from search:", error);
     } finally {
         setLoadingMessages(false);
     }
@@ -565,6 +767,7 @@ const ModernChat: React.FC = () => {
   // 发送文本消息
   const handleSend = async (text: string) => {
     if (!currentChat) return;
+    if (!currentChat.isGroup && !currentChat.otherUser?.$id) return;
     
     setChatSaveStatus('saving');
     
@@ -578,21 +781,37 @@ const ModernChat: React.FC = () => {
         senderId: user.$id,
         content: text,
         type: 'text',
+        messageType: 'text',
         timestamp: new Date().toISOString(),
         status: 'sending',
       };
       setMessages((prev) => [...prev, newMsg]);
+      
+      // Update the last message map optimistically
+      setChatLastMessages(prev => new Map(prev).set(currentChat.$id, newMsg));
 
       // Optimistically update the chat list on the left
       setChats(prevChats => {
         const chatToUpdate = prevChats.find(c => c.$id === currentChat.$id);
         if (!chatToUpdate) return prevChats;
         const otherChats = prevChats.filter(c => c.$id !== currentChat.$id);
-        return [{...chatToUpdate, lastMessage: text, lastMessageTime: new Date().toISOString()}, ...otherChats];
+        const updatedChats = [{...chatToUpdate, lastMessage: text, lastMessageTime: new Date().toISOString()}, ...otherChats];
+        
+        // Update cache
+        try {
+          if (user?.$id) {
+            localStorage.setItem(`chats_cache_${user.$id}`, JSON.stringify(updatedChats));
+          }
+        } catch (error) {
+          // 静默处理缓存更新错误
+        }
+        
+        return updatedChats;
       });
 
       // Send the message to the backend
-      await sendMessage(currentChat.$id, user.$id, text, 'text');
+      const receiverId = currentChat.isGroup ? '' : currentChat.otherUser.$id;
+      await sendMessage(currentChat.$id, user.$id, receiverId, text, 'text');
       
       setChatSaveStatus('saved');
       
@@ -607,7 +826,6 @@ const ModernChat: React.FC = () => {
       setTimeout(() => setChatSaveStatus('idle'), 2000);
       
     } catch (e) {
-      console.error(e);
       setChatSaveStatus('error');
       toast({ title: '发送失败', description: '无法发送消息', variant: 'destructive' });
       
@@ -622,6 +840,122 @@ const ModernChat: React.FC = () => {
     }
   };
 
+  // 发送语音消息
+  const handleSendVoice = async (audioBlob: Blob, duration: number) => {
+    if (!currentChat) return;
+    if (!currentChat.isGroup && !currentChat.otherUser?.$id) return;
+    
+    // Prevent duplicate processing
+    if (isProcessingVoiceRef.current) {
+      return;
+    }
+    
+    isProcessingVoiceRef.current = true;
+    
+    setChatSaveStatus('saving');
+    
+    // Generate unique message ID
+    const tempMessageId = Date.now().toString();
+    
+    try {
+      // Upload voice message to storage
+      const audioFileId = await uploadVoiceMessage(audioBlob, `voice_${tempMessageId}.webm`);
+      const audioUrl = getFilePreview(audioFileId);
+      
+      // Create voice message data
+      const voiceData = {
+        id: audioFileId,
+        name: `voice_${tempMessageId}.webm`,
+        size: audioBlob.size,
+        type: 'audio/webm',
+        url: audioUrl,
+        duration: Math.floor(duration / 1000), // Convert to seconds
+      };
+      
+      // Optimistically add the message to the UI
+      const newMsg = {
+        $id: tempMessageId,
+        senderId: user.$id,
+        content: `语音消息 (${Math.floor(duration / 1000)}s)`,
+        type: 'voice',
+        messageType: 'voice',
+        voiceData: voiceData,
+        timestamp: new Date().toISOString(),
+        status: 'sending',
+      };
+      setMessages((prev) => [...prev, newMsg]);
+      
+      // Update the last message map optimistically
+      setChatLastMessages(prev => new Map(prev).set(currentChat.$id, newMsg));
+
+      // Optimistically update the chat list on the left
+      setChats(prevChats => {
+        const chatToUpdate = prevChats.find(c => c.$id === currentChat.$id);
+        if (!chatToUpdate) return prevChats;
+        const otherChats = prevChats.filter(c => c.$id !== currentChat.$id);
+        const updatedChats = [{
+          ...chatToUpdate, 
+          lastMessage: `🎤 语音消息 (${Math.floor(duration / 1000)}s)`, 
+          lastMessageTime: new Date().toISOString()
+        }, ...otherChats];
+        
+        // Update cache
+        try {
+          if (user?.$id) {
+            localStorage.setItem(`chats_cache_${user.$id}`, JSON.stringify(updatedChats));
+          }
+        } catch (error) {
+          // 静默处理缓存更新错误
+        }
+        
+        return updatedChats;
+      });
+
+      // Send the message to the backend
+      const receiverId = currentChat.isGroup ? '' : currentChat.otherUser.$id;
+      await sendMessage(
+        currentChat.$id, 
+        user.$id, 
+        receiverId, 
+        `语音消息 (${Math.floor(duration / 1000)}s)`, 
+        'voice',
+        voiceData
+      );
+      
+      setChatSaveStatus('saved');
+      
+      // Update message status to sent
+      setMessages((prev) => 
+        prev.map(msg => 
+          msg.$id === tempMessageId ? { ...msg, status: 'sent' } : msg
+        )
+      );
+      
+      // Reset status after short delay
+      setTimeout(() => setChatSaveStatus('idle'), 2000);
+      
+    } catch (e) {
+      setChatSaveStatus('error');
+      toast({ 
+        title: '发送失败', 
+        description: '无法发送语音消息', 
+        variant: 'destructive' 
+      });
+      
+      // Mark message as failed
+      setMessages((prev) => 
+        prev.map(msg => 
+          msg.$id === tempMessageId ? { ...msg, status: 'failed' } : msg
+        )
+      );
+      
+      setTimeout(() => setChatSaveStatus('idle'), 3000);
+    } finally {
+      // Always reset the processing flag
+      isProcessingVoiceRef.current = false;
+    }
+  };
+
   // 附件点击
   const handleAttach = (type: AttachmentType) => {
     // trigger hidden file input
@@ -631,9 +965,40 @@ const ModernChat: React.FC = () => {
     }
   };
 
-  // Handle file selection
+  // 处理消息定时清理设置变更
+  const handleDisappearingDurationChange = async (duration: DisappearingMessageDuration) => {
+    if (!currentChat?.$id) return;
+    
+    try {
+      if (currentChat.isGroup) {
+        // 使用群组特定的API
+        const { updateGroupDisappearingSettings } = await import('@/lib/appwrite/api');
+        await updateGroupDisappearingSettings(currentChat.$id, duration, user.$id);
+      } else {
+        // 使用一对一聊天的API
+        await updateChatDisappearingSettings(currentChat.$id, duration, user.$id);
+      }
+      
+      setCurrentDisappearingDuration(duration);
+      
+      toast({
+        title: duration === 'off' ? '已关闭消息定时清理' : '已开启消息定时清理',
+        description: duration === 'off' 
+          ? '新消息将不会自动删除' 
+          : `新消息将在${duration === '1day' ? '1天' : duration === '3days' ? '3天' : duration === '7days' ? '7天' : '30天'}后自动删除`,
+      });
+    } catch (error) {
+      toast({
+        title: '设置失败',
+        description: currentChat.isGroup ? '只有管理员可以修改群组消息定时清理设置' : '无法更新消息定时清理设置，请重试',
+        variant: 'destructive',
+      });
+    }
+  };
+
   const onFilesSelected = async (e: React.ChangeEvent<HTMLInputElement>) => {
     if (!currentChat) return;
+    if (!currentChat.isGroup && !currentChat.otherUser?.$id) return;
     const files = Array.from(e.target.files || []);
     if (files.length === 0) return;
 
@@ -651,169 +1016,51 @@ const ModernChat: React.FC = () => {
           url: previewUrl,
         };
 
-        await sendMessage(currentChat.$id, user.$id, file.name, 'file', fileMeta);
+        const receiverId = currentChat.isGroup ? '' : currentChat.otherUser.$id;
+        await sendMessage(currentChat.$id, user.$id, receiverId, file.name, 'file', fileMeta);
         const newMsg = {
           $id: Date.now().toString() + Math.random(),
           senderId: user.$id,
           content: file.name,
           type: 'file',
+          messageType: 'file',
           fileData: fileMeta,
           timestamp: new Date().toISOString(),
           status: 'sent',
         };
         setMessages((prev) => [...prev, newMsg]);
+        
+        // Update the last message map optimistically
+        setChatLastMessages(prev => new Map(prev).set(currentChat.$id, newMsg));
+        
+        // Update chat list with file message preview (using the same format as backend)
+        setChats(prevChats => {
+          const chatToUpdate = prevChats.find(c => c.$id === currentChat.$id);
+          if (!chatToUpdate) return prevChats;
+          const otherChats = prevChats.filter(c => c.$id !== currentChat.$id);
+          const updatedChats = [{
+            ...chatToUpdate, 
+            lastMessage: `Attachment: ${file.name}`, 
+            lastMessageTime: new Date().toISOString()
+          }, ...otherChats];
+          
+          // Update cache
+          try {
+            if (user?.$id) {
+              localStorage.setItem(`chats_cache_${user.$id}`, JSON.stringify(updatedChats));
+            }
+          } catch (error) {
+            // 静默处理缓存更新错误
+          }
+          
+          return updatedChats;
+        });
       } catch (err) {
-        console.error(err);
         toast({ title: '发送失败', description: '无法发送文件', variant: 'destructive' });
       }
     }
     // 清空输入值，确保下次 change 触发
     if (fileInputRef.current) fileInputRef.current.value = '';
-  };
-
-  // 过滤线程
-  const filteredThreads = useMemo(() => {
-    if (!search.trim()) return threads;
-    return threads.filter((t) =>
-      t.name.toLowerCase().includes(search.toLowerCase())
-    );
-  }, [search, threads]);
-
-  // 诊断聊天问题（增强版）
-  const handleDiagnoseChats = async () => {
-    if (!user?.$id) {
-      toast({ title: '诊断失败', description: '用户未登录', variant: 'destructive' });
-      return;
-    }
-
-    try {
-      console.log('🔍 开始高级聊天诊断...');
-      
-      // 使用新的高级诊断功能
-      const advancedDiagnosis = await advancedChatDiagnosis(user.$id);
-      
-      // 检查诊断是否成功
-      if (advancedDiagnosis.success === false) {
-        throw new Error(advancedDiagnosis.error || '诊断失败');
-      }
-      
-      // 兼容旧格式的诊断结果
-      const diagnosisResult = {
-        userId: user.$id,
-        userName: user.name,
-        timestamp: new Date().toISOString(),
-        advanced: advancedDiagnosis,
-        // 保留原有格式以便UI兼容
-        databaseChats: advancedDiagnosis.processedChats?.filter((chat: any) => chat.issues?.length === 0) || [],
-        localStorageInfo: getChatStorageInfo(),
-        userDebugInfo: debugUserChats(user.$id),
-        databaseConfig: {
-          databaseId: appwriteConfig.databaseId,
-          chatCollectionId: appwriteConfig.chatCollectionId,
-          messageCollectionId: appwriteConfig.messageCollectionId,
-        },
-        uiState: {
-          chatsLength: chats.length,
-          threadsLength: threads.length,
-          currentChatId: currentChat?.$id,
-          globalCurrentChatId: globalCurrentChat?.id,
-        },
-        diagnosis: {
-          hasLocalChats: (advancedDiagnosis.localCache?.count || 0) > 0,
-          hasDatabaseChats: (advancedDiagnosis.databaseQuery?.documentsCount || 0) > 0,
-          chatCountMismatch: (advancedDiagnosis.localCache?.count || 0) !== (advancedDiagnosis.databaseQuery?.documentsCount || 0),
-          syncIssue: currentChat?.$id !== globalCurrentChat?.id,
-          issues: advancedDiagnosis.issues || [],
-          recommendations: advancedDiagnosis.recommendations || []
-        }
-      };
-
-      console.log('📊 高级聊天诊断结果:', diagnosisResult);
-      setDiagnosisData(diagnosisResult);
-      setShowDiagnosis(true);
-      
-      const dbCount = advancedDiagnosis.databaseQuery?.documentsCount || 0;
-      const localCount = advancedDiagnosis.localCache?.count || 0;
-      
-      toast({ 
-        title: '高级诊断完成', 
-        description: `数据库: ${dbCount} 个，本地: ${localCount} 个聊天记录`,
-      });
-
-    } catch (error) {
-      console.error('高级诊断失败:', error);
-      toast({ title: '诊断失败', description: '无法完成聊天诊断', variant: 'destructive' });
-    }
-  };
-
-  // 智能修复聊天记录
-  const handleSmartFixChats = async () => {
-    if (!user?.$id) {
-      toast({ title: '修复失败', description: '用户未登录', variant: 'destructive' });
-      return;
-    }
-
-    try {
-      console.log('🔧 开始智能修复聊天记录...');
-      
-      toast({ 
-        title: '开始修复', 
-        description: '正在分析和修复聊天数据同步问题...',
-      });
-      
-      // 使用新的智能修复功能
-      const fixResult = await fixChatDataSync(user.$id);
-      
-      if (fixResult.success) {
-        // 更新本地状态
-        setChats(fixResult.chats || []);
-        
-        // 关闭诊断窗口
-        setShowDiagnosis(false);
-        
-        toast({ 
-          title: '智能修复完成', 
-          description: `修复后: ${fixResult.finalCount} 个聊天`,
-        });
-        
-        // 显示详细修复结果
-        console.log('📊 修复结果详情:', fixResult);
-        
-      } else {
-        toast({ 
-          title: '修复失败', 
-          description: fixResult.error || '智能修复过程中出现错误',
-          variant: 'destructive'
-        });
-      }
-
-    } catch (error) {
-      console.error('智能修复失败:', error);
-      toast({ title: '修复失败', description: '无法完成智能修复', variant: 'destructive' });
-    }
-  };
-
-  // 快速重新加载（保留作为备用选项）
-  const handleQuickReload = async () => {
-    if (!user?.$id) return;
-
-    try {
-      setLoadingThreads(true);
-      const freshChats = await getUserChats(user.$id);
-      setChats(freshChats);
-      
-      const CHATS_CACHE_KEY = `chats_cache_${user.$id}`;
-      localStorage.setItem(CHATS_CACHE_KEY, JSON.stringify(freshChats));
-      
-      toast({ 
-        title: '重新加载完成', 
-        description: `显示 ${freshChats.length} 个聊天记录`,
-      });
-    } catch (error) {
-      toast({ title: '加载失败', description: '无法重新加载聊天列表', variant: 'destructive' });
-    } finally {
-      setLoadingThreads(false);
-    }
   };
 
   // Auto scroll to bottom when messages change
@@ -822,35 +1069,6 @@ const ModernChat: React.FC = () => {
       messagesEndRef.current.scrollIntoView({ behavior: 'smooth' });
     }
   }, [messages, loadingMessages]);
-
-  const handleContextMenu = (e: React.MouseEvent, message: any) => {
-    e.preventDefault();
-    e.stopPropagation();
-    if (message.senderId === user.$id) {
-      setContextMenu({
-        x: e.pageX,
-        y: e.pageY,
-        message: message,
-      });
-    }
-  };
-
-  const handleDeleteMessage = async () => {
-    if (!contextMenu || !currentChat) return;
-
-    const { message } = contextMenu;
-
-    try {
-      await deleteMessage(message.$id);
-      setMessages((prevMessages) =>
-        prevMessages.filter((m) => m.$id !== message.$id)
-      );
-    } catch (error) {
-      console.error("Failed to delete message:", error);
-    } finally {
-      setContextMenu(null);
-    }
-  };
 
   // Group consecutive files from the same sender
   const groupConsecutiveFiles = useCallback((messages: any[]) => {
@@ -1004,46 +1222,18 @@ const ModernChat: React.FC = () => {
           <SearchBar value={search} onChange={setSearch} />
         </div>
         <div className="flex-1 overflow-y-auto px-2 pb-4">
-          {search ? (
-            // Search results view
-            isSearching ? (
-              <div className="flex h-full items-center justify-center"><Loader /></div>
-            ) : (
-              <ul className="space-y-1">
-                {searchResults.length > 0 ? (
-                  searchResults.map(userResult => (
-                    <li
-                      key={userResult.$id}
-                      onClick={() => handleSelectUserFromSearch(userResult)}
-                      className="group flex cursor-pointer items-center gap-3 rounded-lg px-4 py-3 transition-colors hover:bg-black/5"
-                    >
-                      <div className="relative h-12 w-12 flex-shrink-0">
-                        <img
-                          src={userResult.imageUrl || '/assets/icons/profile-placeholder.svg'}
-                          alt={userResult.name}
-                          className="h-full w-full rounded-full object-cover"
-                        />
-                      </div>
-                      <div className="min-w-0 flex-1">
-                        <p className="truncate text-base font-medium text-foreground">{userResult.name}</p>
-                        <p className="truncate text-sm text-muted-foreground">{userResult.email}</p>
-                      </div>
-                    </li>
-                  ))
-                ) : (
-                  <p className="text-center text-muted-foreground mt-4">没有找到用户。</p>
-                )}
-              </ul>
-            )
+          {/* 只显示过滤后的对话列表，不再显示搜索新用户的功能 */}
+          {loadingThreads ? (
+            <div className="flex h-full items-center justify-center">
+              <Loader />
+            </div>
+          ) : filteredThreads.length === 0 && search ? (
+            <div className="flex flex-col items-center justify-center h-32 text-muted-foreground">
+              <p className="text-sm">没有找到匹配的对话</p>
+              <p className="text-xs mt-1">尝试搜索其他联系人姓名</p>
+            </div>
           ) : (
-            // Default chat list view
-            loadingThreads ? (
-              <div className="flex h-full items-center justify-center">
-                <Loader />
-              </div>
-            ) : (
-              <MessageList threads={filteredThreads} />
-            )
+            <MessageList threads={filteredThreads} />
           )}
         </div>
       </aside>
@@ -1054,20 +1244,30 @@ const ModernChat: React.FC = () => {
           <>
             {/* Header */}
             <ChatHeader
-              id={currentChat.otherUser?.$id}
-              avatar={currentChat.otherUser?.imageUrl}
-              name={currentChat.otherUser?.name || '聊天'}
+              id={currentChat.isGroup ? currentChat.$id : currentChat.otherUser?.$id}
+              avatar={currentChat.isGroup ? currentChat.avatar : currentChat.otherUser?.imageUrl}
+              name={currentChat.isGroup ? (currentChat.name || `群聊(${currentChat.participants?.length || 0})`) : (currentChat.otherUser?.name || '聊天')}
+              isGroup={currentChat.isGroup}
+              memberCount={currentChat.participants?.length}
               onVoiceCall={() => {
-                if (currentChat?.otherUser) {
+                if (currentChat.isGroup) {
+                  // 群组语音通话 - 显示成员选择界面
+                  setGroupCallType('audio');
+                  setShowGroupCallSelector(true);
+                } else if (currentChat?.otherUser) {
                   initiateCall(currentChat.otherUser.$id, currentChat.otherUser.name, 'audio', currentChat.otherUser.imageUrl);
                 }
               }}
               onVideoCall={() => {
-                if (currentChat?.otherUser) {
+                if (currentChat.isGroup) {
+                  // 群组视频通话 - 显示成员选择界面
+                  setGroupCallType('video');
+                  setShowGroupCallSelector(true);
+                } else if (currentChat?.otherUser) {
                   initiateCall(currentChat.otherUser.$id, currentChat.otherUser.name, 'video', currentChat.otherUser.imageUrl);
                 }
               }}
-              onInfo={() => setShowUserProfile(true)}
+              onInfo={() => currentChat.isGroup ? setShowGroupInfo(true) : setShowChatInfo(true)}
             />
 
             {/* Messages */}
@@ -1132,7 +1332,6 @@ const ModernChat: React.FC = () => {
                                   description: `Successfully downloaded ${downloadFiles.length} files`,
                                 });
                               } catch (error) {
-                                console.error('Batch download failed:', error);
                                 toast({
                                   title: 'Download Failed',
                                   description: 'Failed to download files, please try again',
@@ -1140,7 +1339,6 @@ const ModernChat: React.FC = () => {
                                 });
                               }
                             }}
-                            onContextMenu={(e: React.MouseEvent) => handleContextMenu(e, msg)}
                           />
                         </React.Fragment>
                       );
@@ -1181,11 +1379,61 @@ const ModernChat: React.FC = () => {
                           <FileMessage
                             fileData={fileData}
                             isMyMessage={msg.senderId === user.$id}
-                            onContextMenu={(e: React.MouseEvent) => handleContextMenu(e, msg)}
                             showAvatar={msg.isLastInGroup}
                             isFirstInGroup={msg.isFirstInGroup}
                             isLastInGroup={msg.isLastInGroup}
                             timestamp={msg.formattedTime}
+                          />
+                        </React.Fragment>
+                      );
+                    }
+                    
+                    // Render voice message
+                    if (msg.type === 'voice') {
+                      const vd = msg.voiceData || msg.voice_data || msg.voiceMeta;
+                      const voiceData = typeof vd === 'string' ? JSON.parse(vd) : vd;
+                      
+                      if (voiceData && voiceData.url) {
+                        return (
+                          <React.Fragment key={msg.$id || msg.id}>
+                            {showDateSeparator}
+                            <div className={`flex ${msg.senderId === user.$id ? 'justify-end' : 'justify-start'} mb-2`}>
+                              <div className={`max-w-[320px] ${msg.senderId === user.$id ? 'ml-auto' : 'mr-auto'}`}>
+                                <VoiceMessage
+                                  audioUrl={voiceData.url}
+                                  duration={voiceData.duration || 0}
+                                  isMyMessage={msg.senderId === user.$id}
+                                  isUnread={false} // TODO: Implement unread voice message tracking
+                                  onPlay={() => {
+                                    // Mark as played if needed
+                                  }}
+                                />
+                                {msg.isLastInGroup && (
+                                  <div className={`text-[10px] mt-1 ${msg.senderId === user.$id ? 'text-right text-gray-500' : 'text-left text-gray-500'}`}>
+                                    {msg.formattedTime}
+                                  </div>
+                                )}
+                              </div>
+                            </div>
+                          </React.Fragment>
+                        );
+                      }
+                    }
+                    
+                    // Render system message
+                    if (msg.messageType === 'system_disappearing_message' || 
+                        msg.messageType === 'system_group_created' ||
+                        msg.messageType === 'system_member_added' ||
+                        msg.messageType === 'system_member_removed' ||
+                        msg.messageType === 'system_member_left') {
+                      return (
+                        <React.Fragment key={msg.$id || msg.id}>
+                          {showDateSeparator}
+                          <SystemMessage
+                            content={msg.content}
+                            timestamp={msg.$createdAt || msg.timestamp}
+                            type={msg.messageType}
+                            onClick={() => currentChat.isGroup ? setShowGroupInfo(true) : setShowChatInfo(true)}
                           />
                         </React.Fragment>
                       );
@@ -1213,7 +1461,6 @@ const ModernChat: React.FC = () => {
                           showAvatar={msg.isLastInGroup}
                           isFirstInGroup={msg.isFirstInGroup}
                           isLastInGroup={msg.isLastInGroup}
-                          onContextMenu={(e: React.MouseEvent) => handleContextMenu(e, msg)}
                         />
                         
                         {/* 消息状态指示器（仅对发送中和失败的消息显示） */}
@@ -1244,7 +1491,7 @@ const ModernChat: React.FC = () => {
 
             {/* Input */}
             <div className="relative">
-              <ChatInput onSend={handleSend} onAttach={handleAttach} />
+              <ChatInput onSend={handleSend} onSendVoice={handleSendVoice} onAttach={handleAttach} />
               
               {/* 聊天保存状态指示器 */}
               {chatSaveStatus !== 'idle' && (
@@ -1298,7 +1545,6 @@ const ModernChat: React.FC = () => {
                         <li>• 您的聊天记录完全私密</li>
                         <li>• 只有对话参与者可以查看消息</li>
                         <li>• 其他用户无法访问您的聊天内容</li>
-                        <li>• 所有消息都经过加密保护</li>
                       </ul>
                     </div>
                   </div>
@@ -1309,138 +1555,6 @@ const ModernChat: React.FC = () => {
         )}
       </section>
 
-             {/* 开发模式功能状态面板 */}
-       {process.env.NODE_ENV === 'development' && (
-         <div className="fixed bottom-4 left-4 bg-white dark:bg-dark-2 border border-light-3 dark:border-dark-3 rounded-lg p-3 shadow-lg z-50 max-w-sm">
-           <div className="text-xs space-y-1">
-             <div className="font-semibold text-primary-500 mb-2">聊天功能状态</div>
-             <div className="flex items-center gap-2">
-               <div className={`w-2 h-2 rounded-full ${chats.length > 0 ? 'bg-green-500' : 'bg-red-500'}`}></div>
-               <span>联系人列表: {chats.length} 个聊天</span>
-             </div>
-             <div className="flex items-center gap-2">
-               <div className={`w-2 h-2 rounded-full ${currentChat ? 'bg-green-500' : 'bg-gray-400'}`}></div>
-               <span>当前聊天: {currentChat ? currentChat.otherUser?.name || '已选择' : '未选择'}</span>
-             </div>
-             <div className="flex items-center gap-2">
-               <div className={`w-2 h-2 rounded-full ${globalCurrentChat?.id === currentChat?.$id ? 'bg-green-500' : 'bg-yellow-500'}`}></div>
-               <span>状态同步: {globalCurrentChat?.id === currentChat?.$id ? '已同步' : '部分同步'}</span>
-             </div>
-             <div className="flex items-center gap-2">
-               <div className="w-2 h-2 rounded-full bg-green-500"></div>
-               <span>隐私保护: 已启用</span>
-             </div>
-             <div className="flex items-center gap-2">
-               <div className={`w-2 h-2 rounded-full ${chatSaveStatus === 'saved' ? 'bg-green-500' : chatSaveStatus === 'saving' ? 'bg-yellow-500' : 'bg-gray-400'}`}></div>
-               <span>保存状态: {chatSaveStatus}</span>
-             </div>
-             <div className="mt-2 pt-2 border-t border-gray-200 space-y-1">
-               <Button 
-                 onClick={handleDiagnoseChats} 
-                 size="sm" 
-                 variant="outline" 
-                 className="w-full text-xs h-6"
-               >
-                 🔍 诊断聊天问题
-               </Button>
-               {chats.length !== (globalCurrentChat ? 1 : 0) && (
-                 <Button 
-                   onClick={handleSmartFixChats} 
-                   size="sm" 
-                   variant="outline" 
-                   className="w-full text-xs h-6 bg-green-50 hover:bg-green-100 border-green-300"
-                 >
-                   🧠 一键智能修复
-                 </Button>
-               )}
-             </div>
-           </div>
-         </div>
-       )}
-
-       {/* 聊天诊断结果弹窗 */}
-       {showDiagnosis && diagnosisData && (
-         <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
-           <div className="bg-white dark:bg-dark-2 rounded-lg max-w-4xl max-h-[80vh] overflow-y-auto">
-             <div className="p-6">
-               <div className="flex items-center justify-between mb-4">
-                 <h2 className="text-lg font-semibold">聊天系统诊断报告</h2>
-                 <Button 
-                   onClick={() => setShowDiagnosis(false)} 
-                   variant="ghost" 
-                   size="sm"
-                 >
-                   ✕
-                 </Button>
-               </div>
-               
-               <div className="space-y-4 text-sm">
-                 {/* 基本信息 */}
-                 <div className="bg-gray-50 dark:bg-dark-3 p-3 rounded">
-                   <h3 className="font-medium mb-2">基本信息</h3>
-                   <div className="grid grid-cols-2 gap-2">
-                     <div>用户ID: <code className="text-xs bg-gray-200 px-1 rounded">{diagnosisData.userId}</code></div>
-                     <div>诊断时间: {new Date(diagnosisData.timestamp).toLocaleString()}</div>
-                   </div>
-                 </div>
-
-                 {/* 关键问题诊断 */}
-                 <div className="bg-blue-50 dark:bg-blue-900/20 p-3 rounded">
-                   <h3 className="font-medium mb-2">🔍 问题诊断</h3>
-                   <div className="space-y-1">
-                     <div className="flex items-center gap-2">
-                       <div className={`w-2 h-2 rounded-full ${diagnosisData.databaseQuery.documentsCount > 0 ? 'bg-green-500' : 'bg-red-500'}`}></div>
-                       <span>数据库聊天记录: {diagnosisData.databaseQuery.documentsCount} 个</span>
-                     </div>
-                     <div className="flex items-center gap-2">
-                       <div className={`w-2 h-2 rounded-full ${diagnosisData.localCache.count > 0 ? 'bg-green-500' : 'bg-red-500'}`}></div>
-                       <span>本地聊天记录: {diagnosisData.localCache.count} 个</span>
-                     </div>
-                     <div className="flex items-center gap-2">
-                       <div className={`w-2 h-2 rounded-full ${diagnosisData.databaseQuery.documentsCount === diagnosisData.localCache.count ? 'bg-green-500' : 'bg-yellow-500'}`}></div>
-                       <span>数据同步状态: {diagnosisData.databaseQuery.documentsCount === diagnosisData.localCache.count ? '一致' : '不一致'}</span>
-                     </div>
-                   </div>
-                 </div>
-
-                 {/* 数据库聊天详情 */}
-                 <div className="bg-green-50 dark:bg-green-900/20 p-3 rounded">
-                   <h3 className="font-medium mb-2">📊 数据库聊天记录 ({diagnosisData.processedChats.length})</h3>
-                   {diagnosisData.processedChats.length > 0 ? (
-                     <div className="space-y-2 max-h-40 overflow-y-auto">
-                       {diagnosisData.processedChats.map((chat: any, index: number) => (
-                         <div key={index} className="bg-white dark:bg-dark-2 p-2 rounded text-xs">
-                           <div><strong>ID:</strong> {chat.$id}</div>
-                           <div><strong>对方用户:</strong> {chat.otherUser?.name || '未知'} ({chat.otherUser?.$id})</div>
-                           <div><strong>最后消息:</strong> {chat.lastMessage || '无'}</div>
-                           <div><strong>参与者:</strong> {JSON.stringify(chat.participants)}</div>
-                         </div>
-                       ))}
-                     </div>
-                   ) : (
-                     <div className="text-red-500">⚠️ 数据库中没有找到聊天记录！</div>
-                   )}
-                 </div>
-
-                 {/* 解决建议 */}
-                 <div className="bg-yellow-50 dark:bg-yellow-900/20 p-3 rounded">
-                   <h3 className="font-medium mb-2">💡 问题列表</h3>
-                    {diagnosisData.issues.length > 0 ? (
-                        <ul className="mt-1 ml-4 list-disc text-xs text-red-600">
-                            {diagnosisData.issues.map((issue: string, index: number) => (
-                                <li key={index}>{issue}</li>
-                            ))}
-                        </ul>
-                    ) : (
-                        <p className="text-xs text-green-600">未发现明显的数据同步问题。</p>
-                    )}
-                 </div>
-               </div>
-             </div>
-           </div>
-         </div>
-       )}
-
       {/* Modals */}
       {showUserProfile && currentChat && (
         <UserProfileModal
@@ -1450,25 +1564,70 @@ const ModernChat: React.FC = () => {
         />
       )}
 
-      {/* Message Context Menu */}
-      {contextMenu && (
-        <div
-          style={{ top: contextMenu.y, left: contextMenu.x }}
-          className="absolute z-50 bg-white dark:bg-dark-2 rounded-lg shadow-xl border border-light-3 dark:border-dark-3 overflow-hidden context-menu-animate"
-        >
-          <ul className="py-1">
-            <li>
-              <button
-                onClick={handleDeleteMessage}
-                className="w-full flex items-center gap-3 px-4 py-2 text-sm text-red-500 hover:bg-red-50 dark:hover:bg-red-500/10 transition-colors"
-              >
-                <img src="/assets/icons/delete.svg" alt="删除" className="w-4 h-4" />
-                <span>删除消息</span>
-              </button>
-            </li>
-          </ul>
-        </div>
+      {/* Chat Info Modal */}
+      {showChatInfo && currentChat && !currentChat.isGroup && (
+        <ChatInfoModal
+          isOpen={showChatInfo}
+          onClose={() => setShowChatInfo(false)}
+          user={{
+            $id: currentChat.otherUser.$id,
+            name: currentChat.otherUser.name,
+            imageUrl: currentChat.otherUser.imageUrl,
+            isOnline: isPeerOnline,
+          }}
+          currentDisappearingDuration={currentDisappearingDuration}
+          onDisappearingDurationChange={handleDisappearingDurationChange}
+          onVoiceCall={() => {
+            if (currentChat?.otherUser) {
+              initiateCall(currentChat.otherUser.$id, currentChat.otherUser.name, 'audio', currentChat.otherUser.imageUrl);
+            }
+          }}
+          onVideoCall={() => {
+            if (currentChat?.otherUser) {
+              initiateCall(currentChat.otherUser.$id, currentChat.otherUser.name, 'video', currentChat.otherUser.imageUrl);
+            }
+          }}
+        />
       )}
+
+      {/* Group Info Modal */}
+      {showGroupInfo && currentChat && currentChat.isGroup && (
+        <GroupInfoModal
+          open={showGroupInfo}
+          onClose={() => setShowGroupInfo(false)}
+          groupId={currentChat.$id}
+          onGroupLeft={() => {
+            setCurrentChat(null);
+            setShowGroupInfo(false);
+            // 重新加载聊天列表
+            if (user?.$id) {
+              getUserChats(user.$id).then(setChats);
+            }
+          }}
+          onGroupUpdated={() => {
+            // 重新加载聊天列表
+            if (user?.$id) {
+              getUserChats(user.$id).then(setChats);
+            }
+          }}
+        />
+      )}
+
+      {/* Group Call Member Selector */}
+      {showGroupCallSelector && currentChat && currentChat.isGroup && (
+        <GroupCallMemberSelector
+          open={showGroupCallSelector}
+          onClose={() => setShowGroupCallSelector(false)}
+          groupId={currentChat.$id}
+          callType={groupCallType}
+          onCallMember={(memberId, memberName, memberAvatar) => {
+            initiateCall(memberId, memberName, groupCallType, memberAvatar);
+          }}
+        />
+      )}
+
+      {/* Debug Panel (开发环境) */}
+
     </div>
   );
 };

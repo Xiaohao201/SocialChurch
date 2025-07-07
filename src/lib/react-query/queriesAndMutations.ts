@@ -238,8 +238,8 @@ export const useSendFriendRequest = () => {
   const queryClient = useQueryClient();
 
   return useMutation({
-    mutationFn: ({ senderId, receiverId, message }: { senderId: string; receiverId: string; message?: string }) =>
-      sendFriendRequest(senderId, receiverId, message),
+    mutationFn: ({ senderId, receiverId }: { senderId: string; receiverId: string }) =>
+      sendFriendRequest(senderId, receiverId),
     onSuccess: (data, variables) => {
       // 更温和地更新缓存，避免完全重新加载搜索结果
       // 可以选择性地更新特定查询，而不是使所有搜索查询无效
@@ -258,8 +258,8 @@ export const useHandleFriendRequest = () => {
   const queryClient = useQueryClient();
 
   return useMutation({
-    mutationFn: ({ requestId, status, userId }: { requestId: string; status: 'accepted' | 'rejected'; userId: string }) =>
-      handleFriendRequest(requestId, status, userId),
+    mutationFn: ({ requestId, senderId, receiverId, status }: { requestId: string; senderId: string; receiverId: string; status: 'accepted' | 'rejected' }) =>
+      handleFriendRequest(requestId, senderId, receiverId, status),
     onSuccess: () => {
       queryClient.invalidateQueries({
         queryKey: [QUERY_KEYS.GET_FRIEND_REQUESTS],

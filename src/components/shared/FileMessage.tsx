@@ -31,7 +31,6 @@ interface FileMessageProps {
   fileData: FileData;
   isMyMessage: boolean;
   onDownload?: (fileData: FileData) => void;
-  onContextMenu?: (event: React.MouseEvent) => void;
   showAvatar?: boolean;
   isFirstInGroup?: boolean;
   isLastInGroup?: boolean;
@@ -42,7 +41,6 @@ const FileMessage: React.FC<FileMessageProps> = ({
   fileData, 
   isMyMessage, 
   onDownload, 
-  onContextMenu,
   showAvatar,
   isFirstInGroup,
   isLastInGroup,
@@ -436,7 +434,6 @@ const FileMessage: React.FC<FileMessageProps> = ({
   return (
     <>
       <div 
-        onContextMenu={onContextMenu}
         className={`flex items-start gap-3 max-w-[80%] md:max-w-[60%] lg:max-w-[50%] ${isMyMessage ? 'ml-auto flex-row-reverse' : 'mr-auto'}`}
       >
         {/* 主要文件容器 */}

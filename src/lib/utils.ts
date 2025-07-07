@@ -37,3 +37,15 @@ export function formatTimeAgo(dateString: string): string {
     }
     return 'just now';
 }
+
+/**
+ * 提取事工名称，处理 ministry 字段可能是字符串或对象的情况
+ * @param ministry - 事工字段，可能是字符串、对象或 undefined
+ * @returns 事工名称字符串
+ */
+export function getMinistryName(ministry: string | any | undefined): string {
+    if (!ministry) return '未分配事工';
+    if (typeof ministry === 'string') return ministry;
+    if (typeof ministry === 'object' && ministry.name) return ministry.name;
+    return '未知事工';
+}

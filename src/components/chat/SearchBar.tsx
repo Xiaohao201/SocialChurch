@@ -11,13 +11,13 @@ interface SearchBarProps {
 }
 
 /**
- * A rounded search bar with subtle shadow and accent focus ring.
- * Matches the desktop two-column chat layout design.
+ * A rounded search bar for filtering existing conversations.
+ * Only searches through the conversation list, not all users.
  */
 const SearchBar: React.FC<SearchBarProps> = ({
   value,
   onChange,
-  placeholder = '搜索用户...',
+  placeholder = '搜索对话...',
   className,
 }) => {
   return (
